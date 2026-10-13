@@ -1,25 +1,18 @@
 """대기압 vs HSOH 두께 분석.
 
-사용법
-    1) input/pressure/ 에 대기압 CSV, input/soh/ 에 SOH 두께 CSV 를 넣는다.
-       (폴더 안의 CSV 는 여러 개여도 모두 합쳐서 읽는다)
-    2) python analyze.py
-    3) output/ 폴더에 엑셀 리포트와 그래프가 생성된다.
+사용법 (VS Code 에서 F5 또는 python analyze.py)
+    1) 아래 "설정" 에서 DATA_SOURCE, 기간(DATE_FROM/DATE_TO), SQL 을 채운다.
+    2) 실행하면 bigdataquery.getData() 로 조회 -> 매칭 -> 분석 -> output/ 에 리포트 생성.
+       조회 원본은 output/raw_pressure.csv, output/raw_soh.csv 로도 저장된다.
 
-    파일/폴더를 직접 지정할 수도 있다.
-        python analyze.py --pressure 대기압.csv --soh soh.csv --out 결과폴더
+    DATA_SOURCE = "csv" 로 바꾸면 조회 대신 input/pressure/, input/soh/ 의 CSV 를 읽는다.
+    명령줄로 덮어쓰기:  python analyze.py --from 2026-09-01 --to 2026-09-30
+                        python analyze.py --source csv
 
-    Impala 에서 바로 조회 (CSV 대신):
-        python analyze.py --from 2026-09-01 --to 2026-09-30
-        - 접속 정보: db_config.ini, 쿼리: queries/pressure.sql, queries/soh.sql
-        - 조회 결과는 output/raw_*.csv 로도 저장된다.
-
-CSV 에 컬럼이 많아도 아래 COLUMNS 에 지정한 컬럼만 추출해서 사용한다.
-컬럼명이 다르면 COLUMNS 만 고치면 된다.
+조회 결과/CSV 에 컬럼이 많아도 COLUMNS 에 지정한 컬럼만 추출해서 사용한다.
 """
 import argparse
 import re
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +21,31 @@ import pandas as pd
 # ============================================================
 # 설정 (실제 데이터에 맞게 수정)
 # ============================================================
+DATA_SOURCE = "query"            # "query": bigdataquery 로 조회 / "csv": input 폴더 CSV 사용
+DATE_FROM = "2026-09-01"         # 분석 시작일 (포함)
+DATE_TO = "2026-09-30"           # 분석 종료일 (포함)
+
+# 조회 SQL. {start} {end} 는 실행 시 기간으로 자동 치환된다.
+#   {start}, {end}         -> '2026-09-01 00:00:00' 형식 (end 는 종료일 다음날 0시, 미포함)
+#   {start_ymd}, {end_ymd} -> '20260901' 형식 (날짜 파티션 컬럼용, 둘 다 포함)
+# 기간 조건이 없으면 전체를 조회하므로 오래 걸릴 수 있다. (조회 후 파이썬에서도 기간을 한 번 더 거른다)
+SQL_PRESSURE = """
+select *
+from 대기압쿼리명
+where 1=1
+  and act_time >= '{start}'
+  and act_time <  '{end}'
+"""
+
+SQL_SOH = """
+select *
+from SOH쿼리명
+where 1=1
+  and ITEM_ID = 'AVG'
+  and TKIN_TIME >= '{start}'
+  and TKIN_TIME <  '{end}'
+"""
+
 COLUMNS = {
     "pressure": {
         "time": "act_time",      # 대기압 측정 시간
@@ -51,7 +69,7 @@ LAG_STEP_MIN = 15                # 시차 분석 간격(분)
 MIN_N_FOR_STATS = 3              # 통계 계산 최소 웨이퍼 수
 
 ENCODINGS = ("utf-8-sig", "cp949", "euc-kr", "utf-8")
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 
 
 # ============================================================
@@ -162,77 +180,44 @@ def load_soh(raw):
 
 
 # ============================================================
-# Impala 조회
+# bigdataquery 조회
 # ============================================================
-DB_CONFIG = ROOT / "db_config.ini"
-QUERY_DIR = ROOT / "queries"
+def render_sql(sql, start, end):
+    """SQL 의 {start} {end} {start_ymd} {end_ymd} 를 기간으로 치환. end 는 미포함."""
+    for k, v in {"{start}": start.strftime("%Y-%m-%d %H:%M:%S"),
+                 "{end}": end.strftime("%Y-%m-%d %H:%M:%S"),
+                 "{start_ymd}": start.strftime("%Y%m%d"),
+                 "{end_ymd}": (end - pd.Timedelta(days=1)).strftime("%Y%m%d")}.items():
+        sql = sql.replace(k, v)
+    return sql
 
 
-def connect_impala(config_path=DB_CONFIG):
-    import configparser
+def run_query(sql, name):
     try:
-        from impala.dbapi import connect
+        from bigdataquery import getData
     except ImportError:
-        raise SystemExit("[오류] impyla 가 설치되어 있지 않습니다: pip install impyla")
-    if not Path(config_path).exists():
-        raise SystemExit(f"[오류] 접속 설정 파일이 없습니다: {config_path}")
-    cp = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
-    cp.read(config_path, encoding="utf-8")
-    c = cp["impala"]
-    kw = dict(host=c.get("host"), port=c.getint("port", 21050),
-              auth_mechanism=c.get("auth_mechanism", "NOSASL").upper(),
-              use_ssl=c.getboolean("use_ssl", False), timeout=c.getint("timeout", 600))
-    if c.get("database"):
-        kw["database"] = c.get("database")
-    if c.get("user"):
-        kw["user"] = c.get("user")
-    print(f"  Impala 접속: {kw['host']}:{kw['port']} (auth={kw['auth_mechanism']})")
+        raise SystemExit("[오류] bigdataquery 를 불러올 수 없습니다. "
+                         "평소 getData 를 쓰던 파이썬 환경(인터프리터)에서 실행하세요.")
     try:
-        return connect(**kw)
+        df = getData(sql)
     except Exception as e:
-        raise SystemExit(f"[오류] Impala 접속 실패: {e}\n"
-                         f"       db_config.ini 의 host/port 를 확인하세요. "
-                         f"계속 실패하면 auth_mechanism 을 PLAIN 으로 바꿔보세요.")
-
-
-def render_sql(path, start, end):
-    """SQL 파일의 {start} {end} {start_ymd} {end_ymd} 를 기간으로 치환. end 는 미포함."""
-    sql = Path(path).read_text(encoding="utf-8")
-    sql = sql.format(start=start.strftime("%Y-%m-%d %H:%M:%S"),
-                     end=end.strftime("%Y-%m-%d %H:%M:%S"),
-                     start_ymd=start.strftime("%Y%m%d"),
-                     end_ymd=(end - pd.Timedelta(days=1)).strftime("%Y%m%d"))
-    return sql.strip().rstrip(";")
-
-
-def run_query(conn, sql, name):
-    cur = conn.cursor()
-    try:
-        cur.execute(sql)
-        cols = [d[0] for d in cur.description]
-        df = pd.DataFrame(cur.fetchall(), columns=cols)
-    except Exception as e:
-        raise SystemExit(f"[오류] {name} 쿼리 실패: {e}\n--- SQL ---\n{sql}")
-    finally:
-        cur.close()
+        raise SystemExit(f"[오류] {name} 조회 실패: {e}\n--- SQL ---\n{sql}")
+    if df is None:
+        raise SystemExit(f"[오류] {name} 조회 결과가 없습니다.\n--- SQL ---\n{sql}")
+    df = df if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
     print(f"  {name}: {len(df)}행 조회")
     return df
 
 
-def fetch_from_db(start, end, out_dir, conn=None):
-    conn = conn or connect_impala()
+def fetch_from_query(start, end, out_dir):
+    # 대기압은 시차 분석/직전 평균에 쓰도록 시작 시각보다 앞부분까지 조회
+    margin = pd.Timedelta(minutes=max(LAG_MAX_MIN, WINDOW_MIN) + MATCH_TOLERANCE_MIN)
     raw = {}
-    try:
-        # 대기압은 시차 분석/직전 평균에 쓰도록 시작 시각보다 앞부분까지 조회
-        margin = pd.Timedelta(minutes=max(LAG_MAX_MIN, WINDOW_MIN) + MATCH_TOLERANCE_MIN)
-        for name in ("pressure", "soh"):
-            q_start = start - margin if name == "pressure" else start
-            sql = render_sql(QUERY_DIR / f"{name}.sql", q_start, end)
-            df = run_query(conn, sql, name)
-            df.to_csv(out_dir / f"raw_{name}.csv", index=False, encoding="utf-8-sig")
-            raw[name] = pick_columns(df, COLUMNS[name], f"{name}.sql 조회 결과")
-    finally:
-        conn.close()
+    for name, sql, q_start in (("pressure", SQL_PRESSURE, start - margin),
+                               ("soh", SQL_SOH, start)):
+        df = run_query(render_sql(sql, q_start, end), name)
+        df.to_csv(out_dir / f"raw_{name}.csv", index=False, encoding="utf-8-sig")
+        raw[name] = pick_columns(df, COLUMNS[name], f"{name} 조회 결과")
     return raw["pressure"], raw["soh"]
 
 
@@ -491,38 +476,52 @@ def write_excel(path, df, unmatched, summary, bins, lag, charts):
 # ============================================================
 def main(argv=None):
     ap = argparse.ArgumentParser(description="대기압 vs HSOH 두께 분석")
-    ap.add_argument("--pressure", default=ROOT / "input" / "pressure",
-                    help="대기압 CSV 파일 또는 폴더 (기본: input/pressure)")
-    ap.add_argument("--soh", default=ROOT / "input" / "soh",
-                    help="SOH 두께 CSV 파일 또는 폴더 (기본: input/soh)")
-    ap.add_argument("--out", default=ROOT / "output", help="결과 폴더 (기본: output)")
+    ap.add_argument("--source", choices=["query", "csv"], default=DATA_SOURCE,
+                    help=f"데이터 가져오는 방법 (기본: {DATA_SOURCE})")
     ap.add_argument("--from", dest="date_from", metavar="YYYY-MM-DD",
-                    help="지정하면 CSV 대신 Impala 에서 조회 (시작일)")
+                    help=f"분석 시작일 (조회 모드 기본: {DATE_FROM}, csv 모드 기본: 전체)")
     ap.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD",
-                    help="Impala 조회 종료일 (이 날짜 포함)")
-    args = ap.parse_args(argv)
+                    help=f"분석 종료일, 포함 (조회 모드 기본: {DATE_TO}, csv 모드 기본: 전체)")
+    ap.add_argument("--pressure", default=ROOT / "input" / "pressure",
+                    help="csv 모드: 대기압 CSV 파일 또는 폴더 (기본: input/pressure)")
+    ap.add_argument("--soh", default=ROOT / "input" / "soh",
+                    help="csv 모드: SOH 두께 CSV 파일 또는 폴더 (기본: input/soh)")
+    ap.add_argument("--out", default=ROOT / "output", help="결과 폴더 (기본: output)")
+    args, _ = ap.parse_known_args(argv)  # 주피터 커널 인자는 무시
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.source == "query":
+        args.date_from = args.date_from or DATE_FROM
+        args.date_to = args.date_to or DATE_TO
+    start = end = None
     if args.date_from or args.date_to:
-        if not (args.date_from and args.date_to):
-            raise SystemExit("[오류] --from 과 --to 를 함께 지정하세요.")
         try:
-            start = pd.Timestamp(args.date_from).normalize()
-            end = pd.Timestamp(args.date_to).normalize() + pd.Timedelta(days=1)
+            start = pd.Timestamp(args.date_from).normalize() if args.date_from else None
+            end = (pd.Timestamp(args.date_to).normalize() + pd.Timedelta(days=1)
+                   if args.date_to else None)
         except ValueError:
             raise SystemExit("[오류] 날짜는 YYYY-MM-DD 형식으로 입력하세요.")
-        if end <= start:
-            raise SystemExit("[오류] --to 가 --from 보다 빠릅니다.")
-        print(f"[1/4] Impala 조회 ({start:%Y-%m-%d} ~ {end - pd.Timedelta(days=1):%Y-%m-%d})")
-        raw_p, raw_s = fetch_from_db(start, end, out_dir)
+        if start is not None and end is not None and end <= start:
+            raise SystemExit("[오류] 종료일이 시작일보다 빠릅니다.")
+
+    if args.source == "query":
+        if start is None or end is None:
+            raise SystemExit("[오류] 조회 모드에서는 DATE_FROM / DATE_TO 가 필요합니다.")
+        print(f"[1/4] 조회 ({start:%Y-%m-%d} ~ {end - pd.Timedelta(days=1):%Y-%m-%d})")
+        raw_p, raw_s = fetch_from_query(start, end, out_dir)
     else:
         print("[1/4] CSV 읽기")
         raw_p = read_all(args.pressure, COLUMNS["pressure"])
         raw_s = read_all(args.soh, COLUMNS["soh"])
     pressure = load_pressure(raw_p)
     soh = load_soh(raw_s)
+    if start is not None:
+        soh = soh[soh["time"] >= start]
+    if end is not None:
+        soh = soh[soh["time"] < end]
+    soh = soh.reset_index(drop=True)
     if pressure.empty or soh.empty:
         raise SystemExit("[오류] 사용할 수 있는 데이터가 없습니다.")
     print(f"  대기압 {pressure['time'].min()} ~ {pressure['time'].max()} ({len(pressure)}개)")
@@ -561,4 +560,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -2,35 +2,28 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "분석 실행 (bigdataquery 조회)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/analyze.py",
+      "args": [
+        "--source",
+        "query"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
       "name": "분석 실행 (input 폴더 CSV)",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/analyze.py",
+      "args": [
+        "--source",
+        "csv"
+      ],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal"
-    },
-    {
-      "name": "분석 실행 (CSV 경로 직접 입력)",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/analyze.py",
-      "args": ["--pressure", "${input:pressureCsv}", "--soh", "${input:sohCsv}"],
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal"
-    }
-  ],
-  "inputs": [
-    {
-      "id": "pressureCsv",
-      "type": "promptString",
-      "description": "대기압 CSV 파일 또는 폴더 경로",
-      "default": "input/pressure"
-    },
-    {
-      "id": "sohCsv",
-      "type": "promptString",
-      "description": "SOH 두께 CSV 파일 또는 폴더 경로",
-      "default": "input/soh"
     }
   ]
 }
