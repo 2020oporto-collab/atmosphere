@@ -58,7 +58,7 @@ ROOT = Path(__file__).resolve().parent
 # 읽기
 # ============================================================
 def _norm(name):
-    return re.sub(r"\s+", " ", str(name).replace("﻿", "")).strip().upper()
+    return re.sub(r"\s+", " ", str(name).replace("\ufeff", "")).strip().upper()
 
 
 def pick_columns(df, wanted, src):
