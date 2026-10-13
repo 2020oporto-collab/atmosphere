@@ -10,6 +10,8 @@
    - `input/soh/`      : SOH 두께 CSV
    - 들어있는 `*_sample.csv` 는 가짜 데이터이므로 실제 데이터를 넣을 때 삭제하세요.
 2. 실행
+   - VS Code: 왼쪽 "실행 및 디버그"(Ctrl+Shift+D) → `분석 실행 (input 폴더 CSV)` 선택 → F5
+     - Impala 에서 저장한 CSV 가 다른 폴더에 있으면 `분석 실행 (CSV 경로 직접 입력)` 선택
    - Windows: `run.bat` 더블클릭 (처음 한 번 필요한 패키지를 설치)
    - 또는 `pip install -r requirements.txt` 후 `python analyze.py`
    - 파일 직접 지정: `python analyze.py --pressure 대기압.csv --soh soh.csv --out 결과폴더`
@@ -43,7 +45,7 @@ CSV 에 다른 컬럼이 많아도 아래 컬럼만 추출합니다. 컬럼명 �
 
 허용 오차, 구간 폭, 시차 범위 등은 `analyze.py` 상단 설정에서 바꿀 수 있습니다.
 
-## Impala 조회 (CSV 대신 DB 에서 바로)
+## (선택) Impala 직접 조회 — CSV 저장 없이 코드에서 바로 조회할 때
 
 1. `queries/pressure.sql`, `queries/soh.sql` 의 `<...>` 를 실제 DB/테이블/컬럼명으로 바꾼다.
    - 결과 컬럼명은 `AS` 로 위 입력 형식 컬럼명에 맞춘다 (다른 컬럼이 더 있어도 됨).
