@@ -9,6 +9,11 @@
     파일/폴더를 직접 지정할 수도 있다.
         python analyze.py --pressure 대기압.csv --soh soh.csv --out 결과폴더
 
+    Impala 에서 바로 조회 (CSV 대신):
+        python analyze.py --from 2026-09-01 --to 2026-09-30
+        - 접속 정보: db_config.ini, 쿼리: queries/pressure.sql, queries/soh.sql
+        - 조회 결과는 output/raw_*.csv 로도 저장된다.
+
 CSV 에 컬럼이 많아도 아래 COLUMNS 에 지정한 컬럼만 추출해서 사용한다.
 컬럼명이 다르면 COLUMNS 만 고치면 된다.
 """
@@ -56,9 +61,22 @@ def _norm(name):
     return re.sub(r"\s+", " ", str(name).replace("﻿", "")).strip().upper()
 
 
-def read_csv_columns(path, wanted):
-    """CSV 에서 wanted(내부이름->CSV컬럼명) 컬럼만 읽어 내부이름으로 바꿔 반환."""
+def pick_columns(df, wanted, src):
+    """df 에서 wanted(내부이름->컬럼명) 컬럼만 골라 내부이름으로 바꿔 반환."""
     targets = {_norm(v): k for k, v in wanted.items()}
+    df = df[[c for c in df.columns if _norm(c) in targets]]
+    df = df.rename(columns=lambda c: targets[_norm(c)])
+    df = df.loc[:, ~df.columns.duplicated()]
+    missing = [wanted[k] for k in wanted if k not in df.columns]
+    if missing:
+        raise SystemExit(f"[오류] {src} 에 필요한 컬럼이 없습니다: {missing}\n"
+                         f"       analyze.py 상단 COLUMNS 설정(또는 SQL 의 AS 이름)을 확인하세요.")
+    return df[list(wanted)].astype("string").apply(lambda x: x.str.strip())
+
+
+def read_csv_columns(path, wanted):
+    """CSV 에서 wanted 컬럼만 읽는다. 인코딩은 자동 판별."""
+    targets = {_norm(v) for v in wanted.values()}
     last_err = None
     for enc in ENCODINGS:
         try:
@@ -69,14 +87,7 @@ def read_csv_columns(path, wanted):
             last_err = e
     else:
         raise SystemExit(f"[오류] {path} 인코딩을 읽을 수 없습니다: {last_err}")
-
-    df = df.rename(columns=lambda c: targets[_norm(c)])
-    missing = [wanted[k] for k in wanted if k not in df.columns]
-    if missing:
-        raise SystemExit(f"[오류] {path} 에 필요한 컬럼이 없습니다: {missing}\n"
-                         f"       analyze.py 상단 COLUMNS 설정을 확인하세요.")
-    df = df.loc[:, ~df.columns.duplicated()]
-    return df[list(wanted)].apply(lambda s: s.str.strip())
+    return pick_columns(df, wanted, path)
 
 
 def collect_csvs(path):
@@ -124,8 +135,8 @@ def parse_time(s):
     return out
 
 
-def load_pressure(path):
-    df = read_all(path, COLUMNS["pressure"])
+def load_pressure(raw):
+    df = raw.copy()
     df["time"] = parse_time(df["time"])
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     bad = df["time"].isna() | df["value"].isna()
@@ -135,11 +146,11 @@ def load_pressure(path):
     return df.rename(columns={"value": "pressure"})
 
 
-def load_soh(path):
-    df = read_all(path, COLUMNS["soh"])
+def load_soh(raw):
+    df = raw.copy()
     if ITEM_FILTER is not None:
         before = len(df)
-        df = df[df["item"].str.upper() == ITEM_FILTER.upper()]
+        df = df[df["item"].str.upper().eq(ITEM_FILTER.upper()).fillna(False)]
         print(f"  SOH: ITEM_ID={ITEM_FILTER} 필터 {before} -> {len(df)}행")
     df["time"] = parse_time(df["time"])
     df["thickness"] = pd.to_numeric(df["value"], errors="coerce")
@@ -148,6 +159,81 @@ def load_soh(path):
         print(f"  SOH: 시간/두께를 읽지 못한 {bad.sum()}행 제외")
     df = df[~bad].drop(columns=["value", "item"]).drop_duplicates()
     return df.sort_values("time").reset_index(drop=True)
+
+
+# ============================================================
+# Impala 조회
+# ============================================================
+DB_CONFIG = ROOT / "db_config.ini"
+QUERY_DIR = ROOT / "queries"
+
+
+def connect_impala(config_path=DB_CONFIG):
+    import configparser
+    try:
+        from impala.dbapi import connect
+    except ImportError:
+        raise SystemExit("[오류] impyla 가 설치되어 있지 않습니다: pip install impyla")
+    if not Path(config_path).exists():
+        raise SystemExit(f"[오류] 접속 설정 파일이 없습니다: {config_path}")
+    cp = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    cp.read(config_path, encoding="utf-8")
+    c = cp["impala"]
+    kw = dict(host=c.get("host"), port=c.getint("port", 21050),
+              auth_mechanism=c.get("auth_mechanism", "NOSASL").upper(),
+              use_ssl=c.getboolean("use_ssl", False), timeout=c.getint("timeout", 600))
+    if c.get("database"):
+        kw["database"] = c.get("database")
+    if c.get("user"):
+        kw["user"] = c.get("user")
+    print(f"  Impala 접속: {kw['host']}:{kw['port']} (auth={kw['auth_mechanism']})")
+    try:
+        return connect(**kw)
+    except Exception as e:
+        raise SystemExit(f"[오류] Impala 접속 실패: {e}\n"
+                         f"       db_config.ini 의 host/port 를 확인하세요. "
+                         f"계속 실패하면 auth_mechanism 을 PLAIN 으로 바꿔보세요.")
+
+
+def render_sql(path, start, end):
+    """SQL 파일의 {start} {end} {start_ymd} {end_ymd} 를 기간으로 치환. end 는 미포함."""
+    sql = Path(path).read_text(encoding="utf-8")
+    sql = sql.format(start=start.strftime("%Y-%m-%d %H:%M:%S"),
+                     end=end.strftime("%Y-%m-%d %H:%M:%S"),
+                     start_ymd=start.strftime("%Y%m%d"),
+                     end_ymd=(end - pd.Timedelta(days=1)).strftime("%Y%m%d"))
+    return sql.strip().rstrip(";")
+
+
+def run_query(conn, sql, name):
+    cur = conn.cursor()
+    try:
+        cur.execute(sql)
+        cols = [d[0] for d in cur.description]
+        df = pd.DataFrame(cur.fetchall(), columns=cols)
+    except Exception as e:
+        raise SystemExit(f"[오류] {name} 쿼리 실패: {e}\n--- SQL ---\n{sql}")
+    finally:
+        cur.close()
+    print(f"  {name}: {len(df)}행 조회")
+    return df
+
+
+def fetch_from_db(start, end, out_dir, conn=None):
+    conn = conn or connect_impala()
+    raw = {}
+    try:
+        # 대기압은 시차 분석/직전 평균에 쓰도록 시작 시각보다 앞부분까지 조회
+        margin = pd.Timedelta(minutes=max(LAG_MAX_MIN, WINDOW_MIN) + MATCH_TOLERANCE_MIN)
+        for name in ("pressure", "soh"):
+            q_start = start - margin if name == "pressure" else start
+            sql = render_sql(QUERY_DIR / f"{name}.sql", q_start, end)
+            df = run_query(conn, sql, name)
+            df.to_csv(out_dir / f"raw_{name}.csv", index=False, encoding="utf-8-sig")
+            raw[name] = pick_columns(df, COLUMNS[name], f"{name}.sql 조회 결과")
+    finally:
+        conn.close()
+    return raw["pressure"], raw["soh"]
 
 
 # ============================================================
@@ -410,14 +496,33 @@ def main(argv=None):
     ap.add_argument("--soh", default=ROOT / "input" / "soh",
                     help="SOH 두께 CSV 파일 또는 폴더 (기본: input/soh)")
     ap.add_argument("--out", default=ROOT / "output", help="결과 폴더 (기본: output)")
+    ap.add_argument("--from", dest="date_from", metavar="YYYY-MM-DD",
+                    help="지정하면 CSV 대신 Impala 에서 조회 (시작일)")
+    ap.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD",
+                    help="Impala 조회 종료일 (이 날짜 포함)")
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("[1/4] CSV 읽기")
-    pressure = load_pressure(args.pressure)
-    soh = load_soh(args.soh)
+    if args.date_from or args.date_to:
+        if not (args.date_from and args.date_to):
+            raise SystemExit("[오류] --from 과 --to 를 함께 지정하세요.")
+        try:
+            start = pd.Timestamp(args.date_from).normalize()
+            end = pd.Timestamp(args.date_to).normalize() + pd.Timedelta(days=1)
+        except ValueError:
+            raise SystemExit("[오류] 날짜는 YYYY-MM-DD 형식으로 입력하세요.")
+        if end <= start:
+            raise SystemExit("[오류] --to 가 --from 보다 빠릅니다.")
+        print(f"[1/4] Impala 조회 ({start:%Y-%m-%d} ~ {end - pd.Timedelta(days=1):%Y-%m-%d})")
+        raw_p, raw_s = fetch_from_db(start, end, out_dir)
+    else:
+        print("[1/4] CSV 읽기")
+        raw_p = read_all(args.pressure, COLUMNS["pressure"])
+        raw_s = read_all(args.soh, COLUMNS["soh"])
+    pressure = load_pressure(raw_p)
+    soh = load_soh(raw_s)
     if pressure.empty or soh.empty:
         raise SystemExit("[오류] 사용할 수 있는 데이터가 없습니다.")
     print(f"  대기압 {pressure['time'].min()} ~ {pressure['time'].max()} ({len(pressure)}개)")

@@ -13,6 +13,7 @@
    - Windows: `run.bat` 더블클릭 (처음 한 번 필요한 패키지를 설치)
    - 또는 `pip install -r requirements.txt` 후 `python analyze.py`
    - 파일 직접 지정: `python analyze.py --pressure 대기압.csv --soh soh.csv --out 결과폴더`
+   - Impala 에서 바로 조회: 아래 "Impala 조회" 참고
 3. 결과: `output/`
    - `pressure_vs_soh_report.xlsx` : 그래프 / 요약_회귀 / 대기압구간별 / 시차분석 / 매칭데이터 / 매칭실패 / 설정
    - `1_timeseries.png` ~ `5_lag.png`
@@ -41,6 +42,21 @@ CSV 에 다른 컬럼이 많아도 아래 컬럼만 추출합니다. 컬럼명 �
 - **시차 분석**: TKIN_TIME 보다 0~240분 앞선 대기압과의 상관 — 상관이 가장 높은 시차 확인
 
 허용 오차, 구간 폭, 시차 범위 등은 `analyze.py` 상단 설정에서 바꿀 수 있습니다.
+
+## Impala 조회 (CSV 대신 DB 에서 바로)
+
+1. `queries/pressure.sql`, `queries/soh.sql` 의 `<...>` 를 실제 DB/테이블/컬럼명으로 바꾼다.
+   - 결과 컬럼명은 `AS` 로 위 입력 형식 컬럼명에 맞춘다 (다른 컬럼이 더 있어도 됨).
+   - 기간 조건 `{start}` `{end}` 는 실행 시 자동으로 채워진다. 날짜 파티션 컬럼이 있으면
+     `{start_ymd}` `{end_ymd}` 조건 주석을 풀어서 쓰면 조회가 빨라진다.
+2. `db_config.ini` 에 Impala `host` / `port` 입력 (로그인 없음 = `auth_mechanism = NOSASL`).
+3. 실행
+   - Windows: `run_db.bat` 더블클릭 → 시작일/종료일 입력
+   - 또는 `pip install impyla` 후 `python analyze.py --from 2026-09-01 --to 2026-09-30`
+4. 조회 원본은 `output/raw_pressure.csv`, `output/raw_soh.csv` 로 저장된다.
+   이 파일을 `input/` 에 넣으면 다시 조회하지 않고 CSV 모드로 재분석할 수 있다.
+
+접속이 안 되면: host/port 확인 → `auth_mechanism = PLAIN` 으로 변경 → 담당자에게 문의.
 
 ## 가짜 데이터 다시 만들기
 
