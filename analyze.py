@@ -76,18 +76,21 @@ ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd(
 # 읽기
 # ============================================================
 def _norm(name):
-    return re.sub(r"\s+", " ", str(name).replace("\ufeff", "")).strip().upper()
+    """컬럼명 비교용: 대소문자, 공백, '_', '-', '.' 차이는 무시 (LOT ID = lot_id = LOT-ID)."""
+    return re.sub(r"[\s_\-.\ufeff]+", "", str(name)).upper()
 
 
 def pick_columns(df, wanted, src):
     """df 에서 wanted(내부이름->컬럼명) 컬럼만 골라 내부이름으로 바꿔 반환."""
     targets = {_norm(v): k for k, v in wanted.items()}
+    all_cols = df.columns
     df = df[[c for c in df.columns if _norm(c) in targets]]
     df = df.rename(columns=lambda c: targets[_norm(c)])
     df = df.loc[:, ~df.columns.duplicated()]
     missing = [wanted[k] for k in wanted if k not in df.columns]
     if missing:
         raise SystemExit(f"[오류] {src} 에 필요한 컬럼이 없습니다: {missing}\n"
+                         f"       실제 컬럼: {list(all_cols)}\n"
                          f"       analyze.py 상단 COLUMNS 설정(또는 SQL 의 AS 이름)을 확인하세요.")
     return df[list(wanted)].astype("string").apply(lambda x: x.str.strip())
 
