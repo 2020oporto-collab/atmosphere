@@ -1,6 +1,7 @@
 """가짜(테스트용) CSV 데이터 생성기.
 
-실제 데이터처럼 분석에 필요 없는 컬럼도 섞어서 만든다.
+쿼리1(대기압), 쿼리2(계측), 쿼리3(공정 진행) 결과를 흉내 낸 CSV 3개를 만든다.
+실제 데이터처럼 분석에 필요 없는 컬럼도 섞는다.
     python tools/make_sample_data.py
 """
 import csv
@@ -29,44 +30,53 @@ def true_pressure(t):
     return 1012.0 + 3.0 * math.sin(m / 900) + 1.0 * math.sin(m / 170)
 
 
+def write(path, header, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+
+
 def main():
-    pressure = {}
     rows = []
     t = START
     while t <= END:
-        p = round(true_pressure(t) + random.gauss(0, 0.08), 2)
-        pressure[t] = p
-        rows.append(["FAB1", "ATM_PRESS", fmt(t), p, "hPa", "OK"])
+        rows.append(["FAB1", "ATM_PRESS", fmt(t), round(true_pressure(t) + random.gauss(0, 0.08), 2),
+                     "hPa", "OK"])
         t += timedelta(minutes=5)
-    out = ROOT / "input" / "pressure" / "pressure_sample.csv"
-    with out.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["SITE", "PARAM_NAME", "act_time", " value", "UNIT", "STATUS"])
-        w.writerows(rows)
+    write(ROOT / "input" / "pressure" / "pressure_sample.csv",
+          ["SITE", "PARAM_NAME", "act_time", " value", "UNIT", "STATUS"], rows)
 
-    soh = []
+    meas, proc = [], []
     t = START + timedelta(hours=1)
     lot_no = 0
-    while t < END - timedelta(hours=2):
+    while t < END - timedelta(hours=3):
         lot_no += 1
         lot = f"LOT{2609000 + lot_no}"
         eqp = list(EQP_OFFSET)[lot_no % 3]
+        tk = t + timedelta(seconds=random.randint(0, 59))
+        if lot_no == 5:  # 재작업: 먼저 한 번 진행된 이력 (계측 전, 더 이른 시간) -> 늦은 이력이 쓰여야 함
+            proc.append([lot, "PH_HSOH", "COT01", "SOH_RCP_A", fmt(tk - timedelta(hours=1)), "N"])
+        if lot_no != 7:  # LOT 7 은 공정 정보 없음 -> 매칭실패로 가야 함
+            proc.append([lot, "PH_HSOH", eqp, "SOH_RCP_A", fmt(tk), "N"])
+        if lot_no == 9:  # 계측 이후 다시 진행된 이력 -> 무시되어야 함
+            proc.append([lot, "PH_HSOH", "COT02", "SOH_RCP_A", fmt(tk + timedelta(hours=10)), "Y"])
+        p = true_pressure(tk)
         for wf in range(1, 26, 3):
-            tk = t + timedelta(minutes=wf * 2, seconds=random.randint(0, 59))
-            p = true_pressure(tk)
             avg = 2000 + EQP_OFFSET[eqp] + (p - 1012) * EQP_SENS[eqp] + random.gauss(0, 4)
-            base = [lot, f"{lot}.{wf:02d}", "PH_SOH", eqp, "SOH_RCP_A", fmt(tk)]
+            mt = tk + timedelta(minutes=90 + wf * 2)
             for item, val in [("AVG", avg), ("MAX", avg + random.uniform(10, 20)),
                               ("MIN", avg - random.uniform(10, 20))]:
-                soh.append(base + [item, round(val, 1), "THK_MEAS01", fmt(tk + timedelta(hours=1))])
+                meas.append([lot, f"{lot}.{wf:02d}", "MEAS_SOH", "THK01", item, round(val, 1),
+                             fmt(mt)])
         t += timedelta(minutes=random.randint(40, 120))
-    out = ROOT / "input" / "soh" / "soh_thickness_sample.csv"
-    with out.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["LOT ID", "WAFER ID", "STEP_ID", "EQP_ID", "RECIPE_ID", " TKIN_TIME",
-                    " ITEM_ID", " FAB_VALUE", "MEAS_EQP_ID", "MEAS_TIME"])
-        w.writerows(soh)
-    print(f"대기압 {len(rows)}행, SOH {len(soh)}행 생성")
+    write(ROOT / "input" / "meas" / "meas_sample.csv",
+          ["LOT_ID", "WAFER_ID", "STEP_ID", "MEAS_EQP_ID", "ITEM_ID", "FAB_VALUE", "MEAS_TIME"],
+          meas)
+    write(ROOT / "input" / "proc" / "proc_sample.csv",
+          ["LOT_ID", "STEP_ID", "EQP_ID", "RECIPE_ID", "TKIN_TIME", "REWORK_FLAG"], proc)
+    print(f"대기압 {len(rows)}행, 계측 {len(meas)}행, 공정 {len(proc)}행 생성")
 
 
 if __name__ == "__main__":

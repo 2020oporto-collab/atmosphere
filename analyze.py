@@ -1,11 +1,18 @@
 """대기압 vs HSOH 두께 분석.
 
-사용법 (VS Code 에서 F5 또는 python analyze.py)
-    1) 아래 "설정" 에서 DATA_SOURCE, 기간(DATE_FROM/DATE_TO), SQL 을 채운다.
-    2) 실행하면 bigdataquery.getData() 로 조회 -> 매칭 -> 분석 -> output/ 에 리포트 생성.
-       조회 원본은 output/raw_pressure.csv, output/raw_soh.csv 로도 저장된다.
+데이터 3개를 연결해서 분석한다.
+    쿼리1 대기압      : 시간, 대기압
+    쿼리2 계측        : LOT, WAFER, ITEM, 두께 (+ 계측시간)
+    쿼리3 공정 진행   : LOT, 설비, TKIN_TIME (+ WAFER)
+    쿼리2 + 쿼리3 은 LOT(있으면 WAFER 까지)으로 연결 -> 웨이퍼별 설비, TKIN_TIME
+    그 TKIN_TIME 에 가장 가까운 쿼리1 대기압을 붙인다.
 
-    DATA_SOURCE = "csv" 로 바꾸면 조회 대신 input/pressure/, input/soh/ 의 CSV 를 읽는다.
+사용법 (VS Code 에서 F5 또는 python analyze.py)
+    1) 아래 "설정" 에서 기간(DATE_FROM/DATE_TO), SQL 3개, COLUMNS 를 채운다.
+    2) 실행하면 bigdataquery.getData() 로 조회 -> 연결 -> 분석 -> output/ 에 리포트 생성.
+       조회 원본은 output/raw_pressure.csv, raw_meas.csv, raw_proc.csv 로도 저장된다.
+
+    DATA_SOURCE = "csv" 로 바꾸면 조회 대신 input/pressure/, input/meas/, input/proc/ 의 CSV 를 읽는다.
     명령줄로 덮어쓰기:  python analyze.py --from 2026-09-01 --to 2026-09-30
                         python analyze.py --source csv
 
@@ -22,13 +29,18 @@ import pandas as pd
 # 설정 (실제 데이터에 맞게 수정)
 # ============================================================
 DATA_SOURCE = "query"            # "query": bigdataquery 로 조회 / "csv": input 폴더 CSV 사용
-DATE_FROM = "2026-09-01"         # 분석 시작일 (포함)
-DATE_TO = "2026-09-30"           # 분석 종료일 (포함)
+DATE_FROM = "2026-09-01"         # 분석 시작일 (계측 기준, 포함)
+DATE_TO = "2026-09-30"           # 분석 종료일 (계측 기준, 포함)
+PROC_LOOKBACK_DAYS = 3           # 공정 진행 조회를 계측 시작일보다 며칠 앞부터 할지
 
-# 조회 SQL. {start} {end} 는 실행 시 기간으로 자동 치환된다.
+# 조회 SQL. 아래 자리표시자는 실행할 때 자동으로 바뀐다.
 #   {start}, {end}         -> '2026-09-01 00:00:00' 형식 (end 는 종료일 다음날 0시, 미포함)
 #   {start_ymd}, {end_ymd} -> '20260901' 형식 (날짜 파티션 컬럼용, 둘 다 포함)
-# 기간 조건이 없으면 전체를 조회하므로 오래 걸릴 수 있다. (조회 후 파이썬에서도 기간을 한 번 더 거른다)
+#   {lots}                 -> 쿼리2 에서 나온 LOT 목록 'LOT1','LOT2',... (쿼리3 에서만 사용 가능)
+# 쿼리1(대기압) 의 기간은 쿼리3 에서 나온 TKIN_TIME 범위에 맞춰 자동으로 정해진다.
+# 쿼리3 의 {start} 는 계측 시작일 - PROC_LOOKBACK_DAYS 이다.
+
+# 쿼리1: 대기압
 SQL_PRESSURE = """
 select *
 from 대기압쿼리명
@@ -37,27 +49,43 @@ where 1=1
   and act_time <  '{end}'
 """
 
-SQL_SOH = """
+# 쿼리2: LOT - 계측 데이터
+SQL_MEAS = """
 select *
-from SOH쿼리명
+from 계측쿼리명
 where 1=1
   and ITEM_ID = 'AVG'
-  and TKIN_TIME >= '{start}'
-  and TKIN_TIME <  '{end}'
+  and MEAS_TIME >= '{start}'
+  and MEAS_TIME <  '{end}'
 """
 
+# 쿼리3: LOT - 공정 진행 정보 (HSOH 공정만 나오도록 STEP 조건을 꼭 넣을 것)
+SQL_PROC = """
+select *
+from 공정진행쿼리명
+where 1=1
+  and LOT_ID in ({lots})
+  -- and STEP_ID = 'HSOH 공정 STEP'
+"""
+
+# 각 쿼리 결과에서 사용할 컬럼명. None 은 "그 컬럼 없음" 이라는 뜻.
 COLUMNS = {
-    "pressure": {
+    "pressure": {                # 쿼리1
         "time": "act_time",      # 대기압 측정 시간
         "value": "value",        # 대기압 값 (hPa)
     },
-    "soh": {
-        "lot": "LOT ID",
-        "wafer": "WAFER ID",
-        "eqp": "EQP_ID",
-        "time": "TKIN_TIME",     # 대기압과 매칭할 기준 시간
+    "meas": {                    # 쿼리2
+        "lot": "LOT_ID",
+        "wafer": "WAFER_ID",
         "item": "ITEM_ID",
         "value": "FAB_VALUE",    # 두께 (Å)
+        "meas_time": "MEAS_TIME",  # 계측 시간 (없으면 None)
+    },
+    "proc": {                    # 쿼리3
+        "lot": "LOT_ID",
+        "eqp": "EQP_ID",
+        "time": "TKIN_TIME",     # 공정 진행 시간 -> 대기압 매칭 기준
+        "wafer": None,           # 공정 정보가 WAFER 단위면 컬럼명 입력 (LOT 단위면 None)
     },
 }
 ITEM_FILTER = "AVG"              # ITEM_ID 가 이 값인 행만 사용 (None 이면 필터 안 함)
@@ -70,6 +98,7 @@ MIN_N_FOR_STATS = 3              # 통계 계산 최소 웨이퍼 수
 
 ENCODINGS = ("utf-8-sig", "cp949", "euc-kr", "utf-8")
 ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+SOURCES = {"pressure": "쿼리1(대기압)", "meas": "쿼리2(계측)", "proc": "쿼리3(공정)"}
 
 
 # ============================================================
@@ -77,13 +106,18 @@ ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd(
 # ============================================================
 def _norm(name):
     """컬럼명 비교용: 대소문자, 공백, '_', '-', '.' 차이는 무시 (LOT ID = lot_id = LOT-ID)."""
-    return re.sub(r"[\s_\-.\ufeff]+", "", str(name)).upper()
+    return re.sub(r"[\s_\-.﻿]+", "", str(name)).upper()
 
 
-def pick_columns(df, wanted, src):
-    """df 에서 wanted(내부이름->컬럼명) 컬럼만 골라 내부이름으로 바꿔 반환."""
+def _wanted(kind):
+    return {k: v for k, v in COLUMNS[kind].items() if v}
+
+
+def pick_columns(df, kind, src, all_cols=None):
+    """df 에서 COLUMNS[kind] 에 지정한 컬럼만 골라 내부이름으로 바꿔 반환."""
+    wanted = _wanted(kind)
     targets = {_norm(v): k for k, v in wanted.items()}
-    all_cols = df.columns
+    all_cols = df.columns if all_cols is None else all_cols
     df = df[[c for c in df.columns if _norm(c) in targets]]
     df = df.rename(columns=lambda c: targets[_norm(c)])
     df = df.loc[:, ~df.columns.duplicated()]
@@ -95,12 +129,13 @@ def pick_columns(df, wanted, src):
     return df[list(wanted)].astype("string").apply(lambda x: x.str.strip())
 
 
-def read_csv_columns(path, wanted):
-    """CSV 에서 wanted 컬럼만 읽는다. 인코딩은 자동 판별."""
-    targets = {_norm(v) for v in wanted.values()}
+def read_csv_columns(path, kind):
+    """CSV 에서 COLUMNS[kind] 컬럼만 읽는다. 인코딩은 자동 판별."""
+    targets = {_norm(v) for v in _wanted(kind).values()}
     last_err = None
     for enc in ENCODINGS:
         try:
+            header = pd.read_csv(path, encoding=enc, nrows=0).columns
             df = pd.read_csv(path, encoding=enc, dtype=str,
                              usecols=lambda c: _norm(c) in targets)
             break
@@ -108,7 +143,7 @@ def read_csv_columns(path, wanted):
             last_err = e
     else:
         raise SystemExit(f"[오류] {path} 인코딩을 읽을 수 없습니다: {last_err}")
-    return pick_columns(df, wanted, path)
+    return pick_columns(df, kind, path, header)
 
 
 def collect_csvs(path):
@@ -124,10 +159,10 @@ def collect_csvs(path):
     return files
 
 
-def read_all(path, wanted):
+def read_all(path, kind):
     files = collect_csvs(path)
-    frames = [read_csv_columns(f, wanted) for f in files]
-    print(f"  {path}: {len(files)}개 파일, {sum(map(len, frames))}행")
+    frames = [read_csv_columns(f, kind) for f in files]
+    print(f"  {SOURCES[kind]} {path}: {len(files)}개 파일, {sum(map(len, frames))}행")
     return pd.concat(frames, ignore_index=True)
 
 
@@ -167,30 +202,43 @@ def load_pressure(raw):
     return df.rename(columns={"value": "pressure"})
 
 
-def load_soh(raw):
+def load_meas(raw):
     df = raw.copy()
     if ITEM_FILTER is not None:
         before = len(df)
         df = df[df["item"].str.upper().eq(ITEM_FILTER.upper()).fillna(False)]
-        print(f"  SOH: ITEM_ID={ITEM_FILTER} 필터 {before} -> {len(df)}행")
-    df["time"] = parse_time(df["time"])
+        print(f"  계측: ITEM_ID={ITEM_FILTER} 필터 {before} -> {len(df)}행")
     df["thickness"] = pd.to_numeric(df["value"], errors="coerce")
-    bad = df["time"].isna() | df["thickness"].isna()
+    if "meas_time" in df:
+        df["meas_time"] = parse_time(df["meas_time"])
+    bad = df["thickness"].isna() | df["lot"].isna() | df["wafer"].isna()
     if bad.any():
-        print(f"  SOH: 시간/두께를 읽지 못한 {bad.sum()}행 제외")
+        print(f"  계측: LOT/WAFER/두께를 읽지 못한 {bad.sum()}행 제외")
     df = df[~bad].drop(columns=["value", "item"]).drop_duplicates()
-    return df.sort_values("time").reset_index(drop=True)
+    return df.reset_index(drop=True)
+
+
+def load_proc(raw):
+    df = raw.copy()
+    df["time"] = parse_time(df["time"])
+    bad = df["time"].isna() | df["lot"].isna()
+    if bad.any():
+        print(f"  공정: LOT/TKIN_TIME 을 읽지 못한 {bad.sum()}행 제외")
+    return df[~bad].drop_duplicates().reset_index(drop=True)
 
 
 # ============================================================
 # bigdataquery 조회
 # ============================================================
-def render_sql(sql, start, end):
-    """SQL 의 {start} {end} {start_ymd} {end_ymd} 를 기간으로 치환. end 는 미포함."""
-    for k, v in {"{start}": start.strftime("%Y-%m-%d %H:%M:%S"),
-                 "{end}": end.strftime("%Y-%m-%d %H:%M:%S"),
-                 "{start_ymd}": start.strftime("%Y%m%d"),
-                 "{end_ymd}": (end - pd.Timedelta(days=1)).strftime("%Y%m%d")}.items():
+def render_sql(sql, start, end, lots=None):
+    """SQL 의 자리표시자를 치환. end 는 미포함."""
+    rep = {"{start}": start.strftime("%Y-%m-%d %H:%M:%S"),
+           "{end}": end.strftime("%Y-%m-%d %H:%M:%S"),
+           "{start_ymd}": start.strftime("%Y%m%d"),
+           "{end_ymd}": (end - pd.Timedelta(seconds=1)).strftime("%Y%m%d")}
+    if lots is not None:
+        rep["{lots}"] = ",".join("'" + str(x).replace("'", "''") + "'" for x in lots) or "''"
+    for k, v in rep.items():
         sql = sql.replace(k, v)
     return sql
 
@@ -212,20 +260,58 @@ def run_query(sql, name):
     return df
 
 
+def _fetch(kind, sql, start, end, out_dir, lots=None):
+    df = run_query(render_sql(sql, start, end, lots), SOURCES[kind])
+    df.to_csv(out_dir / f"raw_{kind}.csv", index=False, encoding="utf-8-sig")
+    return pick_columns(df, kind, f"{SOURCES[kind]} 조회 결과")
+
+
 def fetch_from_query(start, end, out_dir):
-    # 대기압은 시차 분석/직전 평균에 쓰도록 시작 시각보다 앞부분까지 조회
+    """쿼리2 -> 쿼리3 -> 쿼리1 순서로 조회 (앞 결과로 다음 조회 범위를 정한다)."""
+    meas = _fetch("meas", SQL_MEAS, start, end, out_dir)
+    if meas.empty:
+        raise SystemExit("[오류] 쿼리2(계측) 조회 결과가 0행입니다. 기간/조건을 확인하세요.")
+    lots = sorted(meas["lot"].dropna().str.strip().unique())
+    proc = _fetch("proc", SQL_PROC, start - pd.Timedelta(days=PROC_LOOKBACK_DAYS), end,
+                  out_dir, lots)
+    if proc.empty:
+        raise SystemExit("[오류] 쿼리3(공정) 조회 결과가 0행입니다. 기간/조건을 확인하세요.")
+
+    # 대기압은 TKIN_TIME 범위 + 시차 분석/직전 평균에 필요한 앞부분까지 조회
+    t = parse_time(proc["time"]).dropna()
     margin = pd.Timedelta(minutes=max(LAG_MAX_MIN, WINDOW_MIN) + MATCH_TOLERANCE_MIN)
-    raw = {}
-    for name, sql, q_start in (("pressure", SQL_PRESSURE, start - margin),
-                               ("soh", SQL_SOH, start)):
-        df = run_query(render_sql(sql, q_start, end), name)
-        df.to_csv(out_dir / f"raw_{name}.csv", index=False, encoding="utf-8-sig")
-        raw[name] = pick_columns(df, COLUMNS[name], f"{name} 조회 결과")
-    return raw["pressure"], raw["soh"]
+    p_start = (t.min() - margin).floor("min")
+    p_end = (t.max() + pd.Timedelta(minutes=MATCH_TOLERANCE_MIN + 1)).ceil("min")
+    pressure = _fetch("pressure", SQL_PRESSURE, p_start, p_end, out_dir)
+    return pressure, meas, proc
 
 
 # ============================================================
-# 매칭
+# 연결 (쿼리2 + 쿼리3)
+# ============================================================
+def join_meas_proc(meas, proc):
+    """계측에 공정 정보(설비, TKIN_TIME)를 붙인다.
+
+    LOT(공정 정보에 WAFER 가 있으면 LOT+WAFER)으로 연결한다.
+    한 웨이퍼에 공정 이력이 여러 건이면 계측 시간 이전의 가장 늦은 TKIN_TIME 을 쓴다.
+    (계측 시간이 없으면 가장 늦은 TKIN_TIME)
+    """
+    keys = ["lot", "wafer"] if "wafer" in proc else ["lot"]
+    m = meas.reset_index(names="_mid")
+    j = m.merge(proc, on=keys, how="inner")
+    n_multi = (j.groupby("_mid").size() > 1).sum()
+    if "meas_time" in j:
+        j = j[~(j["meas_time"].notna() & (j["time"] > j["meas_time"]))]
+    j = j.sort_values("time").drop_duplicates("_mid", keep="last")
+    if n_multi:
+        print(f"  공정 이력이 2건 이상인 웨이퍼 {n_multi}개 -> 계측 이전 가장 늦은 TKIN_TIME 사용")
+    joined = j.sort_values("_mid").drop(columns="_mid").reset_index(drop=True)
+    missing = m[~m["_mid"].isin(j["_mid"])].drop(columns="_mid").reset_index(drop=True)
+    return joined, missing
+
+
+# ============================================================
+# 대기압 매칭
 # ============================================================
 def _asof(left_time, pressure, col, tol_min, direction="nearest"):
     left = pd.DataFrame({"t": left_time.values, "_i": np.arange(len(left_time))}).sort_values("t")
@@ -433,20 +519,20 @@ def write_excel(path, df, unmatched, summary, bins, lag, charts):
     from openpyxl.drawing.image import Image
     from openpyxl.utils import get_column_letter
 
-    c = COLUMNS["soh"]
+    cm, cp = COLUMNS["meas"], COLUMNS["proc"]
+    names = {"lot": cm["lot"], "wafer": cm["wafer"], "eqp": cp["eqp"], "time": cp["time"],
+             "meas_time": cm.get("meas_time") or "계측시간", "thickness": "두께(Å)"}
     data = df.rename(columns={
-        "lot": c["lot"], "wafer": c["wafer"], "eqp": c["eqp"], "time": c["time"],
-        "thickness": "두께(Å)", "pressure": "대기압(hPa)", "pressure_time": "매칭된 대기압 시간",
+        **names, "pressure": "대기압(hPa)", "pressure_time": "매칭된 대기압 시간",
         f"pressure_avg_{WINDOW_MIN}m": f"직전{WINDOW_MIN}분 평균 대기압",
         f"pressure_change_{WINDOW_MIN}m": f"{WINDOW_MIN}분간 대기압 변화",
         "eqp_mean": "설비 평균 두께", "thickness_dev": "설비 평균 대비 편차(Å)"})
-    um = unmatched.rename(columns={"lot": c["lot"], "wafer": c["wafer"], "eqp": c["eqp"],
-                                   "time": c["time"], "thickness": "두께(Å)"})
+    um = unmatched.rename(columns=names)
     settings = pd.DataFrame({"항목": [
-        "매칭 기준 시간", "ITEM_ID 필터", "매칭 허용 오차(분)", "평균/변화량 구간(분)",
-        "대기압 구간 폭(hPa)", "매칭 웨이퍼 수", "매칭 실패 웨이퍼 수"], "값": [
-        c["time"], ITEM_FILTER, MATCH_TOLERANCE_MIN, WINDOW_MIN, PRESSURE_BIN_HPA,
-        len(df), len(unmatched)]})
+        "쿼리2-3 연결 키", "대기압 매칭 기준 시간", "ITEM_ID 필터", "매칭 허용 오차(분)",
+        "평균/변화량 구간(분)", "대기압 구간 폭(hPa)", "매칭 웨이퍼 수", "매칭 실패 웨이퍼 수"], "값": [
+        "LOT+WAFER" if cp.get("wafer") else "LOT", cp["time"], ITEM_FILTER,
+        MATCH_TOLERANCE_MIN, WINDOW_MIN, PRESSURE_BIN_HPA, len(df), len(unmatched)]})
 
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         summary.to_excel(xw, sheet_name="요약_회귀", index=False)
@@ -482,13 +568,12 @@ def main(argv=None):
     ap.add_argument("--source", choices=["query", "csv"], default=DATA_SOURCE,
                     help=f"데이터 가져오는 방법 (기본: {DATA_SOURCE})")
     ap.add_argument("--from", dest="date_from", metavar="YYYY-MM-DD",
-                    help=f"분석 시작일 (조회 모드 기본: {DATE_FROM}, csv 모드 기본: 전체)")
+                    help=f"분석 시작일, 계측 기준 (조회 모드 기본: {DATE_FROM}, csv 모드 기본: 전체)")
     ap.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD",
                     help=f"분석 종료일, 포함 (조회 모드 기본: {DATE_TO}, csv 모드 기본: 전체)")
-    ap.add_argument("--pressure", default=ROOT / "input" / "pressure",
-                    help="csv 모드: 대기압 CSV 파일 또는 폴더 (기본: input/pressure)")
-    ap.add_argument("--soh", default=ROOT / "input" / "soh",
-                    help="csv 모드: SOH 두께 CSV 파일 또는 폴더 (기본: input/soh)")
+    for kind, folder in (("pressure", "pressure"), ("meas", "meas"), ("proc", "proc")):
+        ap.add_argument(f"--{kind}", default=ROOT / "input" / folder,
+                        help=f"csv 모드: {SOURCES[kind]} CSV 파일 또는 폴더 (기본: input/{folder})")
     ap.add_argument("--out", default=ROOT / "output", help="결과 폴더 (기본: output)")
     args, _ = ap.parse_known_args(argv)  # 주피터 커널 인자는 무시
 
@@ -512,40 +597,56 @@ def main(argv=None):
     if args.source == "query":
         if start is None or end is None:
             raise SystemExit("[오류] 조회 모드에서는 DATE_FROM / DATE_TO 가 필요합니다.")
-        print(f"[1/4] 조회 ({start:%Y-%m-%d} ~ {end - pd.Timedelta(days=1):%Y-%m-%d})")
-        raw_p, raw_s = fetch_from_query(start, end, out_dir)
+        print(f"[1/5] 조회 ({start:%Y-%m-%d} ~ {end - pd.Timedelta(days=1):%Y-%m-%d})")
+        raw_p, raw_m, raw_c = fetch_from_query(start, end, out_dir)
     else:
-        print("[1/4] CSV 읽기")
-        raw_p = read_all(args.pressure, COLUMNS["pressure"])
-        raw_s = read_all(args.soh, COLUMNS["soh"])
+        print("[1/5] CSV 읽기")
+        raw_p = read_all(args.pressure, "pressure")
+        raw_m = read_all(args.meas, "meas")
+        raw_c = read_all(args.proc, "proc")
     pressure = load_pressure(raw_p)
-    soh = load_soh(raw_s)
-    if start is not None:
-        soh = soh[soh["time"] >= start]
-    if end is not None:
-        soh = soh[soh["time"] < end]
-    soh = soh.reset_index(drop=True)
-    if pressure.empty or soh.empty:
-        raise SystemExit("[오류] 사용할 수 있는 데이터가 없습니다.")
-    print(f"  대기압 {pressure['time'].min()} ~ {pressure['time'].max()} ({len(pressure)}개)")
-    print(f"  SOH    {soh['time'].min()} ~ {soh['time'].max()} ({len(soh)}웨이퍼)")
+    meas = load_meas(raw_m)
+    proc = load_proc(raw_c)
+    if "meas_time" in meas and (start is not None or end is not None):
+        mt = meas["meas_time"]
+        keep = pd.Series(True, index=meas.index)
+        if start is not None:
+            keep &= mt.isna() | (mt >= start)
+        if end is not None:
+            keep &= mt.isna() | (mt < end)
+        meas = meas[keep].reset_index(drop=True)
+    if pressure.empty or meas.empty or proc.empty:
+        raise SystemExit("[오류] 사용할 수 있는 데이터가 없습니다. "
+                         f"(대기압 {len(pressure)} / 계측 {len(meas)} / 공정 {len(proc)}행)")
 
-    print("[2/4] 시간 매칭")
+    print("[2/5] 계측 + 공정 연결 (LOT" + (", WAFER" if "wafer" in proc else "") + ")")
+    soh, no_proc = join_meas_proc(meas, proc)
+    print(f"  연결 {len(soh)} / 공정정보 없음 {len(no_proc)} (계측 웨이퍼 {len(meas)})")
+    if soh.empty:
+        raise SystemExit("[오류] 계측과 공정 정보가 연결된 웨이퍼가 없습니다. "
+                         "두 쿼리의 LOT 값 형식이 같은지 확인하세요.")
+    print(f"  대기압 {pressure['time'].min()} ~ {pressure['time'].max()} ({len(pressure)}개)")
+    print(f"  TKIN   {soh['time'].min()} ~ {soh['time'].max()} ({len(soh)}웨이퍼)")
+
+    print("[3/5] 대기압 매칭 (TKIN_TIME 기준)")
     merged = match(soh, pressure)
-    unmatched = merged[merged["pressure"].isna()][["lot", "wafer", "eqp", "time", "thickness"]]
+    cols = ["lot", "wafer", "eqp", "time", "meas_time", "thickness"]
+    no_p = merged[merged["pressure"].isna()].assign(사유="대기압 없음")
+    unmatched = pd.concat([no_proc.assign(사유="공정정보 없음"), no_p], ignore_index=True)
+    unmatched = unmatched[[c for c in cols if c in unmatched] + ["사유"]]
     df = merged[merged["pressure"].notna()].copy()
     df["eqp_mean"] = df.groupby("eqp")["thickness"].transform("mean")
     df["thickness_dev"] = df["thickness"] - df["eqp_mean"]
-    print(f"  매칭 {len(df)} / 실패 {len(unmatched)} (허용 ±{MATCH_TOLERANCE_MIN}분)")
+    print(f"  매칭 {len(df)} / 대기압 없음 {len(no_p)} (허용 ±{MATCH_TOLERANCE_MIN}분)")
     if df.empty:
-        raise SystemExit("[오류] 매칭된 웨이퍼가 없습니다. 두 데이터의 기간을 확인하세요.")
+        raise SystemExit("[오류] 대기압이 매칭된 웨이퍼가 없습니다. 두 데이터의 기간을 확인하세요.")
 
-    print("[3/4] 분석")
+    print("[4/5] 분석")
     summary = summary_table(df)
     bins = bin_table(df)
     lag = lag_table(df, pressure)
 
-    print("[4/4] 결과 저장")
+    print("[5/5] 결과 저장")
     charts = make_charts(df, pressure, summary, lag, out_dir)
     xlsx = out_dir / "pressure_vs_soh_report.xlsx"
     try:
