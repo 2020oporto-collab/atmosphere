@@ -98,6 +98,8 @@ PRESSURE_BIN_HPA = 1.0           # 대기압 구간 폭(hPa)
 LAG_MAX_MIN = 240                # 시차 분석 최대 범위(분)
 LAG_STEP_MIN = 15                # 시차 분석 간격(분)
 MIN_N_FOR_STATS = 3              # 통계 계산 최소 웨이퍼 수
+EXCEL_MAX_ROWS = 20000           # 매칭데이터가 이보다 많으면 엑셀 대신 CSV 로 저장 (엑셀 저장이 느려짐)
+MAKE_PNG = True                  # False 면 PNG 그래프 생략 (HTML 리포트로 충분할 때 시간 절약)
 
 ENCODINGS = ("utf-8-sig", "cp949", "euc-kr", "utf-8")
 ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
@@ -746,6 +748,7 @@ function timeTicks(t0, t1, n) {
   return { ticks: out, fmt: st >= Dd ? fmtD : (v => (new Date(v).getUTCHours() === 0 ? fmtD(v) : fmtH(v))) };
 }
 const f = (v, d = 2) => (v == null || !isFinite(v)) ? "-" : v.toFixed(d);
+const tk = v => String(v === 0 ? 0 : v);  // 눈금 값은 niceTicks 가 이미 깔끔하게 만든 수
 function regress(xs, ys) {
   const n = xs.length; if (n < 3) return { n, slope: NaN, icpt: NaN, r: NaN, r2: NaN };
   let mx = 0, my = 0; for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; } mx /= n; my /= n;
@@ -853,6 +856,35 @@ function clipG(svg, x, y, w, h) {
   el("rect", { x, y, width: Math.max(0, w), height: Math.max(0, h) }, cp);
   return el("g", { "clip-path": `url(#${id})` }, svg);
 }
+// 점이 많으면 SVG 요소 대신 canvas 에 한 번에 그린다 (수만 개도 빠름). svg 는 그 위에 겹쳐 축/선/툴팁 담당
+function dotLayer(box, svg, W, H, clip) {
+  box.style.position = "relative"; svg.style.position = "relative";
+  const c = document.createElement("canvas"), dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+  c.style.cssText = `position:absolute;left:0;top:0;width:${W}px;height:${H}px;pointer-events:none`;
+  box.insertBefore(c, svg);
+  const ctx = c.getContext("2d"); ctx.scale(dpr, dpr);
+  ctx.beginPath(); ctx.rect(clip[0], clip[1], clip[2], clip[3]); ctx.clip();
+  return ctx;
+}
+function cssVar(v) {
+  const mm = /var\((--[\w-]+)\)/.exec(v);
+  return mm ? getComputedStyle(document.documentElement).getPropertyValue(mm[1]).trim() : v;
+}
+function drawDots(ctx, idx, px, py, r, alpha) {
+  const groups = new Map();
+  for (const i of idx) { const e = D.w.eqp[i]; if (!groups.has(e)) groups.set(e, []); groups.get(e).push(i); }
+  const ring = cssVar("var(--surface)");
+  ctx.globalAlpha = alpha;
+  for (const [e, ii] of groups) {
+    ctx.fillStyle = cssVar(colorOf(e)); ctx.strokeStyle = ring; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const i of ii) { const x = px(i), y = py(i); ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, 6.2832); }
+    if (ii.length < 3000) ctx.stroke();
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
 for (const [cid, axes] of Object.entries(AX)) {
   const card = document.getElementById(cid).closest(".card"), head = card.querySelector(".head");
   const btn = document.createElement("button"); btn.className = "btn"; btn.textContent = "⚙ 축 설정";
@@ -953,7 +985,7 @@ function renderTS(S) {
   const [yA, yB] = rng("ts", "y", tlo - tp, thi + tp), y2 = lin(yA, yB, tBt, tT);
   const tt = timeTicks(tA, tB, Math.max(4, Math.floor(W / 110)));
   // 축/그리드 (겹치기일 때 그리드는 왼쪽 두께 축 기준으로만)
-  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y2(v), y2: y2(v) }, svg); el("text", { x: m.l - 6, y: y2(v) + 4, "text-anchor": "end", text: f(v, 0) }, svg); }
+  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y2(v), y2: y2(v) }, svg); el("text", { x: m.l - 6, y: y2(v) + 4, "text-anchor": "end", text: tk(v) }, svg); }
   for (const v of niceTicks(pA, pB, ov ? 5 : 4)) {
     if (ov) el("text", { x: W - m.r + 6, y: y1(v) + 4, "text-anchor": "start", text: f(v, 1) }, svg);
     else { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y1(v), y2: y1(v) }, svg); el("text", { x: m.l - 6, y: y1(v) + 4, "text-anchor": "end", text: f(v, 1) }, svg); }
@@ -981,9 +1013,8 @@ function renderTS(S) {
     let d = ""; for (let i = 0; i < D.p.t.length; i++) d += (i ? "L" : "M") + x(D.p.t[i]).toFixed(1) + "," + y1(pv[i]).toFixed(1);
     el("path", { d, style: "fill:none;stroke:var(--ink2);stroke-width:2;stroke-linejoin:round" }, g1);
   }
-  // 두께 점
-  const g2 = clipG(svg, m.l, tT, pw, tBt - tT);
-  for (const i of vis) el("circle", { cx: x(D.w.t[i]), cy: y2(D.w.thk[i]), r: 3, style: `fill:${colorOf(D.w.eqp[i])};stroke:var(--surface);stroke-width:1` }, g2);
+  // 두께 점 (canvas)
+  drawDots(dotLayer(box, svg, W, H, [m.l, tT, pw, tBt - tT]), vis, i => x(D.w.t[i]), i => y2(D.w.thk[i]), 3, 1);
   // 크로스헤어 + 브러시
   const cross = el("line", { x1: 0, x2: 0, y1: top, y2: tBt, style: "stroke:var(--muted);stroke-width:1;display:none" }, svg);
   const dot = el("circle", { r: 4, style: "fill:var(--ink2);stroke:var(--surface);stroke-width:2;display:none" }, svg);
@@ -1051,13 +1082,13 @@ function renderScatter(S) {
   const ylo = Math.min(...ys), yhi = Math.max(...ys), yp = (yhi - ylo) * 0.08 || 1;
   const [xA, xB] = rng("sc", "x", xlo - xp, xhi + xp), [yA, yB] = rng("sc", "y", ylo - yp, yhi + yp);
   const x = lin(xA, xB, m.l, W - m.r), y = lin(yA, yB, H - m.b, m.t);
-  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: f(v, Math.abs(yB - yA) < 5 ? 1 : 0) }, svg); }
-  for (const v of niceTicks(xA, xB, 6)) el("text", { x: x(v), y: H - m.b + 16, "text-anchor": "middle", text: f(v, 1) }, svg);
+  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: tk(v) }, svg); }
+  for (const v of niceTicks(xA, xB, 6)) el("text", { x: x(v), y: H - m.b + 16, "text-anchor": "middle", text: tk(v) }, svg);
   el("line", { class: "base", x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b }, svg);
   el("text", { class: "lbl", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", text: "대기압 (hPa)" }, svg);
   el("text", { class: "lbl", x: 4, y: m.t - 2, text: state.y === "dev" ? "Δ 두께 (Å)" : "두께 (Å)" }, svg);
   const g = clipG(svg, m.l, m.t, W - m.l - m.r, H - m.t - m.b);
-  for (const i of S.idx) el("circle", { cx: x(D.w.p[i]), cy: y(yv(i)), r: 3.5, style: `fill:${colorOf(D.w.eqp[i])};fill-opacity:0.75;stroke:var(--surface);stroke-width:1` }, g);
+  drawDots(dotLayer(box, svg, W, H, [m.l, m.t, W - m.l - m.r, H - m.t - m.b]), S.idx, i => x(D.w.p[i]), i => y(yv(i)), 3.5, 0.75);
   // 설비별 회귀선 + 직접 라벨
   const on = EQPS.filter(e => state.on.has(e));
   const labels = [];
@@ -1103,14 +1134,15 @@ function renderSens(S) {
   const lo = Math.min(0, ...st.map(s => s.slope)), hi = Math.max(0, ...st.map(s => s.slope)), p = (hi - lo) * 0.05 || 1;
   const [xA, xB] = rng("sens", "x", lo - (lo < 0 ? p : 0), hi + p), x = lin(xA, xB, m.l, W - m.r);
   const cl = v => Math.min(Math.max(v, m.l), W - m.r);
-  for (const v of niceTicks(xA, xB, 5)) { el("line", { class: "grid", x1: x(v), x2: x(v), y1: m.t, y2: H - m.b }, svg); el("text", { x: x(v), y: H - 6, "text-anchor": "middle", text: f(v, 1) }, svg); }
+  for (const v of niceTicks(xA, xB, 5)) { el("line", { class: "grid", x1: x(v), x2: x(v), y1: m.t, y2: H - m.b }, svg); el("text", { x: x(v), y: H - 6, "text-anchor": "middle", text: tk(v) }, svg); }
   if (xA <= 0 && xB >= 0) el("line", { class: "base", x1: x(0), x2: x(0), y1: m.t, y2: H - m.b }, svg);
   const g = clipG(svg, m.l, m.t, W - m.l - m.r, H - m.t - m.b);
   st.forEach((s, k) => {
     const yc = m.t + k * rowH + rowH / 2, a = x(Math.min(0, s.slope)), b = x(Math.max(0, s.slope));
     el("text", { class: "lbl", x: m.l - 8, y: yc + 4, "text-anchor": "end", text: s.e }, svg);
     const bar = el("rect", { x: a, y: yc - 9, width: Math.max(2, b - a), height: 18, rx: 4, style: `fill:${colorOf(s.e)}` }, g);
-    el("text", { class: "val", x: s.slope >= 0 ? cl(b) + 6 : cl(a) - 6, y: yc + 4, "text-anchor": s.slope >= 0 ? "start" : "end", text: `${f(s.slope, 2)}  (R² ${f(s.r2, 2)})` }, svg);
+    const sd = Math.abs(s.slope) < 0.1 ? 3 : 2, lx = s.slope >= 0 ? cl(b) + 6 : cl(x(0)) + 6;
+    el("text", { class: "val", x: lx, y: yc + 4, "text-anchor": "start", text: `${f(s.slope, sd)}  (R² ${f(s.r2, 2)})` }, svg);
     const h = el("rect", { x: m.l, y: yc - rowH / 2, width: W - m.l - m.r, height: rowH, style: "fill:transparent" }, svg);
     h.addEventListener("pointermove", ev => { bar.style.opacity = 0.8; showTip(ev, s.e, [[colorOf(s.e), f(s.slope, 3) + " Å/hPa", "기울기"], [null, f(s.r2, 3), "R²"], [null, String(s.n), "웨이퍼 수"]]); });
     h.addEventListener("pointerleave", () => { bar.style.opacity = 1; hideTip(); });
@@ -1133,7 +1165,7 @@ function renderBins(S) {
   const [yA, yB] = rng("bins", "y", lo - p, hi + p);
   const y = lin(yA, yB, H - m.b, m.t), slot = (W - m.l - m.r) / bins.length, bwid = Math.max(4, Math.min(48, slot - 6));
   const y0 = y(Math.min(Math.max(0, yA), yB));
-  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: f(v, Math.abs(yB - yA) < 5 ? 1 : 0) }, svg); }
+  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: tk(v) }, svg); }
   el("line", { class: "base", x1: m.l, x2: W - m.r, y1: y0, y2: y0 }, svg);
   el("text", { class: "lbl", x: 4, y: m.t - 6, text: "Δ 두께 (Å)" }, svg);
   el("text", { class: "lbl", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", text: `대기압 구간 시작값 (hPa, 폭 ${bw})` }, svg);
@@ -1161,8 +1193,8 @@ function renderLag() {
   const lo = Math.min(...rs), hi = Math.max(...rs), p = (hi - lo) * 0.15 || 0.05;
   const [yA, yB] = rng("lag", "y", lo - p, hi + p);
   const x = lin(xlo, xhi, m.l, W - m.r), y = lin(yA, yB, H - m.b, m.t);
-  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: f(v, 2) }, svg); }
-  for (const v of niceTicks(xlo, xhi, 6)) el("text", { x: x(v), y: H - m.b + 16, "text-anchor": "middle", text: String(v) }, svg);
+  for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: tk(v) }, svg); }
+  for (const v of niceTicks(xlo, xhi, 6)) el("text", { x: x(v), y: H - m.b + 16, "text-anchor": "middle", text: tk(v) }, svg);
   el("line", { class: "base", x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b }, svg);
   el("text", { class: "lbl", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", text: "시차 (분, TKIN_TIME 이전)" }, svg);
   el("text", { class: "lbl", x: 4, y: m.t - 6, text: "Pearson r" }, svg);
@@ -1171,7 +1203,8 @@ function renderLag() {
   const best = L.reduce((a, b) => Math.abs(b.r) > Math.abs(a.r) ? b : a);
   if (best.r >= yA && best.r <= yB) {
     el("circle", { cx: x(best.lag), cy: y(best.r), r: 5, style: "fill:var(--s1);stroke:var(--surface);stroke-width:2" }, svg);
-    el("text", { class: "val", x: x(best.lag) + 8, y: y(best.r) - 8, text: `최대 |r| ${f(best.r, 3)} @ ${best.lag}분` }, svg);
+    const right = x(best.lag) > W - 160;
+    el("text", { class: "val", x: x(best.lag) + (right ? -8 : 8), y: y(best.r) - 8, "text-anchor": right ? "end" : "start", text: `최대 |r| ${f(best.r, 3)} @ ${best.lag}분` }, svg);
   }
   const cross = el("line", { y1: m.t, y2: H - m.b, style: "stroke:var(--muted);stroke-width:1;display:none" }, svg);
   const dot = el("circle", { r: 4, style: "fill:var(--s1);stroke:var(--surface);stroke-width:2;display:none" }, svg);
@@ -1223,9 +1256,6 @@ render();
 # 엑셀
 # ============================================================
 def write_excel(path, df, unmatched, summary, bins, lag, charts):
-    from openpyxl.drawing.image import Image
-    from openpyxl.utils import get_column_letter
-
     cm, cp = COLUMNS["meas"], COLUMNS["proc"]
     names = {"lot": cm["lot"], "wafer": cm["wafer"], "eqp": cp["eqp"], "time": cp["time"],
              "meas_time": cm.get("meas_time") or "계측시간", "thickness": "두께(Å)"}
@@ -1240,36 +1270,85 @@ def write_excel(path, df, unmatched, summary, bins, lag, charts):
         "평균/변화량 구간(분)", "대기압 구간 폭(hPa)", "매칭 웨이퍼 수", "매칭 실패 웨이퍼 수"], "값": [
         "LOT+WAFER" if cp.get("wafer") else "LOT", cp["time"], ITEM_FILTER,
         MATCH_TOLERANCE_MIN, WINDOW_MIN, PRESSURE_BIN_HPA, len(df), len(unmatched)]})
+    sheets = {"요약_회귀": summary, "대기압구간별": bins, "시차분석": lag,
+              "매칭데이터": data, "매칭실패": um, "설정": settings}
+    if len(data) > EXCEL_MAX_ROWS:  # 행이 많으면 원본 행은 CSV 로 (엑셀로 바로 열림)
+        csv_path = Path(path).with_name("matched_data.csv")
+        data.to_csv(csv_path, index=False, encoding="utf-8-sig", date_format="%Y-%m-%d %H:%M:%S")
+        sheets["매칭데이터"] = pd.DataFrame({"안내": [
+            f"매칭 데이터가 {len(data):,}행으로 많아서 {csv_path.name} 파일로 따로 저장했습니다.",
+            f"(EXCEL_MAX_ROWS = {EXCEL_MAX_ROWS:,} 설정으로 기준을 바꿀 수 있습니다)"]})
+        print(f"  매칭데이터 {len(data):,}행 -> {csv_path}")
+    # 숫자는 미리 반올림 (셀마다 서식을 지정하면 행이 많을 때 매우 느림)
+    for name, d in sheets.items():
+        d = d.copy()
+        num = d.select_dtypes("float").columns
+        d[num] = d[num].round(6 if name in ("요약_회귀", "시차분석") else 4)
+        sheets[name] = d
 
-    with pd.ExcelWriter(path, engine="openpyxl") as xw:
-        summary.to_excel(xw, sheet_name="요약_회귀", index=False)
-        bins.to_excel(xw, sheet_name="대기압구간별", index=False)
-        lag.to_excel(xw, sheet_name="시차분석", index=False)
-        data.to_excel(xw, sheet_name="매칭데이터", index=False)
-        um.to_excel(xw, sheet_name="매칭실패", index=False)
-        settings.to_excel(xw, sheet_name="설정", index=False)
-        for ws in xw.book.worksheets:
-            ws.freeze_panes = "A2"
-            for i, col in enumerate(ws.iter_cols(min_row=1, max_row=min(ws.max_row, 200)), 1):
-                width = max(len(str(v.value)) if v.value is not None else 0 for v in col)
-                ws.column_dimensions[get_column_letter(i)].width = min(max(10, width * 1.3), 40)
-            for row in ws.iter_rows(min_row=2):
-                for cell in row:
-                    if isinstance(cell.value, float):
-                        cell.number_format = "0.000"
-                    elif hasattr(cell.value, "hour"):
-                        cell.number_format = "yyyy-mm-dd hh:mm:ss"
-        ws = xw.book.create_sheet("그래프", 0)
-        row = 1
-        for f in charts:
-            img = Image(str(f))
-            ws.add_image(img, f"A{row}")
-            row += int(img.height / 20) + 2
+    def width(d, col):
+        sample = d[col].head(200).astype(str).str.len().max() if len(d) else 0
+        return min(max(10, max(len(str(col)), sample or 0) * 1.3), 40)
+
+    try:
+        import xlsxwriter  # noqa: F401  (있으면 openpyxl 보다 훨씬 빠름. Anaconda 에 기본 포함)
+        engine = "xlsxwriter"
+    except ImportError:
+        engine = "openpyxl"
+    with pd.ExcelWriter(path, engine=engine, datetime_format="yyyy-mm-dd hh:mm:ss") as xw:
+        for name, d in sheets.items():
+            d.to_excel(xw, sheet_name=name, index=False)
+        if engine == "xlsxwriter":
+            for name, d in sheets.items():
+                ws = xw.sheets[name]
+                ws.freeze_panes(1, 0)
+                for i, col in enumerate(d.columns):
+                    ws.set_column(i, i, width(d, col))
+            ws = xw.book.add_worksheet("그래프")
+            row = 0
+            for f in charts:
+                ws.insert_image(row, 0, str(f))
+                row += 24
+            xw.book.worksheets_objs.insert(0, xw.book.worksheets_objs.pop())  # 그래프 시트를 맨 앞으로
+            ws.activate()
+        else:
+            from openpyxl.drawing.image import Image
+            from openpyxl.utils import get_column_letter
+            for name, d in sheets.items():
+                ws = xw.sheets[name]
+                ws.freeze_panes = "A2"
+                for i, col in enumerate(d.columns, 1):
+                    ws.column_dimensions[get_column_letter(i)].width = width(d, col)
+            ws = xw.book.create_sheet("그래프", 0)
+            row = 1
+            for f in charts:
+                img = Image(str(f))
+                ws.add_image(img, f"A{row}")
+                row += int(img.height / 20) + 2
 
 
 # ============================================================
 # main
 # ============================================================
+class Clock:
+    """단계별 소요 시간 기록 (어디가 느린지 확인용)."""
+    def __init__(self):
+        import time
+        self._time = time.perf_counter
+        self.t = self._time()
+        self.steps = []
+
+    def __call__(self, name):
+        now = self._time()
+        self.steps.append((name.strip(), now - self.t))
+        print(f"  ({name.strip()}: {now - self.t:.1f}초)")
+        self.t = now
+
+    def summary(self):
+        total = sum(s for _, s in self.steps)
+        return f"총 {total:.1f}초 = " + ", ".join(f"{n} {s:.1f}" for n, s in self.steps)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="대기압 vs HSOH 두께 분석")
     ap.add_argument("--source", choices=["query", "csv"], default=DATA_SOURCE,
@@ -1286,6 +1365,7 @@ def main(argv=None):
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    clock = Clock()
 
     if args.source == "query":
         args.date_from = args.date_from or DATE_FROM
@@ -1326,6 +1406,7 @@ def main(argv=None):
         raise SystemExit("[오류] 사용할 수 있는 데이터가 없습니다. "
                          f"(대기압 {len(pressure)} / 계측 {len(meas)} / 공정 {len(proc)}행)")
 
+    clock("1/5 조회/읽기")
     print("[2/5] 계측 + 공정 연결 (LOT" + (", WAFER" if "wafer" in proc else "") + ")")
     soh, no_proc = join_meas_proc(meas, proc)
     print(f"  연결 {len(soh)} / 공정정보 없음 {len(no_proc)} (계측 웨이퍼 {len(meas)})")
@@ -1335,6 +1416,7 @@ def main(argv=None):
     print(f"  대기압 {pressure['time'].min()} ~ {pressure['time'].max()} ({len(pressure)}개)")
     print(f"  TKIN   {soh['time'].min()} ~ {soh['time'].max()} ({len(soh)}웨이퍼)")
 
+    clock("2/5 연결")
     print("[3/5] 대기압 매칭 (TKIN_TIME 기준)")
     merged = match(soh, pressure)
     cols = ["lot", "wafer", "eqp", "time", "meas_time", "thickness"]
@@ -1348,26 +1430,32 @@ def main(argv=None):
     if df.empty:
         raise SystemExit("[오류] 대기압이 매칭된 웨이퍼가 없습니다. 두 데이터의 기간을 확인하세요.")
 
+    clock("3/5 매칭")
     print("[4/5] 분석")
     summary = summary_table(df)
     bins = bin_table(df)
     lag = lag_table(df, pressure)
 
+    clock("4/5 분석")
     print("[5/5] 결과 저장")
-    charts = make_charts(df, pressure, summary, lag, out_dir)
+    charts = make_charts(df, pressure, summary, lag, out_dir) if MAKE_PNG else []
+    clock("  그래프(PNG)")
     html = out_dir / "pressure_vs_soh_report.html"
     write_html(html, df, pressure, lag)
+    clock("  HTML")
     xlsx = out_dir / "pressure_vs_soh_report.xlsx"
     try:
         write_excel(xlsx, df, unmatched, summary, bins, lag, charts)
     except PermissionError:
         raise SystemExit(f"[오류] {xlsx} 가 열려 있어 저장할 수 없습니다. 엑셀을 닫고 다시 실행하세요.")
+    clock("  엑셀")
 
     pd.set_option("display.width", 200)
     print("\n=== 대기압 1 hPa 당 두께 변화 ===")
     print(summary[["구분", "N", "기울기(Å/hPa)", "R²", "p-value"]]
           .to_string(index=False, float_format=lambda v: f"{v:.4g}"))
-    print(f"\n결과: {html}  <- 브라우저로 열기 (인터랙티브)")
+    print(f"\n소요 시간: {clock.summary()}")
+    print(f"결과: {html}  <- 브라우저로 열기 (인터랙티브)")
     print(f"      {xlsx}")
     for f in charts:
         print(f"      {f}")
