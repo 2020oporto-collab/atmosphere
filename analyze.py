@@ -31,7 +31,7 @@ import pandas as pd
 DATA_SOURCE = "query"            # "query": bigdataquery 로 조회 / "csv": input 폴더 CSV 사용
 DATE_FROM = "2026-09-01"         # 분석 시작일 (계측 기준, 포함)
 DATE_TO = "2026-09-30"           # 분석 종료일 (계측 기준, 포함)
-PROC_LOOKBACK_DAYS = 3           # 공정 진행 조회를 계측 시작일보다 며칠 앞부터 할지
+PROC_LOOKBACK_DAYS = 3           # 쿼리3(공정) 조회를 계측 시작일보다 며칠 앞부터 할지
 
 # 조회 SQL. 아래 자리표시자는 실행할 때 자동으로 바뀐다.
 #   {start}, {end}         -> '2026-09-01 00:00:00' 형식 (end 는 종료일 다음날 0시, 미포함)
@@ -60,11 +60,14 @@ where 1=1
 """
 
 # 쿼리3: LOT - 공정 진행 정보 (HSOH 공정만 나오도록 STEP 조건을 꼭 넣을 것)
+#   {start} 는 계측 시작일 - PROC_LOOKBACK_DAYS (계측 전에 진행된 공정까지 포함하려고)
+#   기간 대신 LOT 으로 조회하려면:  and LOT_ID in ({lots})
 SQL_PROC = """
 select *
 from 공정진행쿼리명
 where 1=1
-  and LOT_ID in ({lots})
+  and TKIN_TIME >= '{start}'
+  and TKIN_TIME <  '{end}'
   -- and STEP_ID = 'HSOH 공정 STEP'
 """
 

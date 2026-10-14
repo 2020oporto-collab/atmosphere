@@ -23,7 +23,8 @@
    - `DATE_FROM`, `DATE_TO` : 분석 기간 (계측 기준, 둘 다 포함)
    - `SQL_PRESSURE`, `SQL_MEAS`, `SQL_PROC` : 평소 `getData()` 에 넣던 SQL
      - `{start}` `{end}` : 기간으로 자동 치환
-     - `{lots}` : 쿼리2 결과의 LOT 목록으로 치환 (쿼리3 에서 `LOT_ID in ({lots})`)
+     - 쿼리3 의 `{start}` 는 계측 시작일 - `PROC_LOOKBACK_DAYS`(기본 3일)
+     - (선택) `{lots}` : 쿼리2 결과의 LOT 목록으로 치환 (쿼리3 에서 `LOT_ID in ({lots})`)
      - 쿼리3 에는 HSOH 공정 STEP 조건을 꼭 넣을 것
      - 쿼리1 의 기간은 쿼리3 의 TKIN_TIME 범위에 맞춰 자동으로 정해진다
    - `COLUMNS` : 각 쿼리 결과의 실제 컬럼명 (결과에 컬럼이 많아도 여기 지정한 것만 사용)
