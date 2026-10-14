@@ -280,8 +280,11 @@ def fetch_from_query(start, end, out_dir):
     if proc.empty:
         raise SystemExit("[오류] 쿼리3(공정) 조회 결과가 0행입니다. 기간/조건을 확인하세요.")
 
-    # 대기압은 TKIN_TIME 범위 + 시차 분석/직전 평균에 필요한 앞부분까지 조회
-    t = parse_time(proc["time"]).dropna()
+    # 대기압은 (계측 LOT 의) TKIN_TIME 범위 + 시차 분석/직전 평균에 필요한 앞부분까지 조회
+    rel = proc[proc["lot"].isin(lots)]
+    t = parse_time((rel if len(rel) else proc)["time"]).dropna()
+    if t.empty:
+        raise SystemExit("[오류] 쿼리3(공정) 의 TKIN_TIME 을 읽지 못했습니다. 시간 형식을 확인하세요.")
     margin = pd.Timedelta(minutes=max(LAG_MAX_MIN, WINDOW_MIN) + MATCH_TOLERANCE_MIN)
     p_start = (t.min() - margin).floor("min")
     p_end = (t.max() + pd.Timedelta(minutes=MATCH_TOLERANCE_MIN + 1)).ceil("min")
