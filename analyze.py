@@ -519,6 +519,539 @@ def _fit_line(ax, x, y, color):
 
 
 # ============================================================
+# HTML (인터랙티브 리포트, 외부 라이브러리/인터넷 없이 열림)
+# ============================================================
+def write_html(path, df, pressure, lag):
+    import json
+
+    def ms(t):
+        return ((t - pd.Timestamp("1970-01-01")) // pd.Timedelta(milliseconds=1)).astype("int64").tolist()
+
+    d = df.sort_values("time")
+    p = pressure.sort_values("time")
+    lag_rows = [{"lag": int(r["시차(분, TKIN 이전)"]), "n": int(r["N"]),
+                 "r": None if pd.isna(r["Pearson r"]) else round(float(r["Pearson r"]), 4),
+                 "slope": None if pd.isna(r["기울기(Å/hPa)"]) else round(float(r["기울기(Å/hPa)"]), 4)}
+                for _, r in lag.iterrows()]
+    t0, t1 = d["time"].min(), d["time"].max()
+    sub = (f"TKIN {t0:%Y-%m-%d %H:%M} ~ {t1:%Y-%m-%d %H:%M} · 웨이퍼 {len(d)}장 · "
+           f"설비 {d['eqp'].nunique()}대 · 대기압 매칭 허용 ±{MATCH_TOLERANCE_MIN}분 · "
+           f"생성 {pd.Timestamp.now():%Y-%m-%d %H:%M}")
+    data = {
+        "eqps": sorted(d["eqp"].astype(str).unique().tolist()),
+        "w": {"t": ms(d["time"]), "eqp": d["eqp"].astype(str).tolist(),
+              "lot": d["lot"].astype(str).tolist(), "wafer": d["wafer"].astype(str).tolist(),
+              "thk": d["thickness"].astype(float).round(2).tolist(),
+              "p": d["pressure"].astype(float).round(3).tolist()},
+        "p": {"t": ms(p["time"]), "p": p["pressure"].astype(float).round(3).tolist()},
+        "lag": lag_rows,
+        "meta": {"sub": sub, "bin": PRESSURE_BIN_HPA},
+    }
+    js = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    Path(path).write_text(HTML_TEMPLATE.replace("__DATA__", js), encoding="utf-8")
+
+
+HTML_TEMPLATE = r'''<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>대기압 vs HSOH 두께</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; --s0: #898781;
+  --sel: rgba(42,120,214,0.12);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --sel: rgba(57,135,229,0.18);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --sel: rgba(57,135,229,0.18);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.45 "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font-size: 20px; margin: 0 0 2px; }
+h2 { font-size: 15px; margin: 0; }
+.sub, .hint { color: var(--ink2); font-size: 12px; margin: 2px 0 0; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0 12px; }
+.filters .lab { color: var(--ink2); font-size: 12px; margin-right: 2px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink); cursor: pointer; font: inherit; font-size: 13px; }
+.chip .key { width: 14px; height: 3px; border-radius: 2px; }
+.chip[aria-pressed="false"] { color: var(--muted); }
+.chip[aria-pressed="false"] .key { opacity: 0.25; }
+.btn { padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink); cursor: pointer; font: inherit; font-size: 12px; }
+.range { color: var(--ink2); font-size: 12px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.kpi .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kpi .l { color: var(--ink2); font-size: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 12px; min-width: 0; }
+.head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+svg { display: block; width: 100%; overflow: visible; user-select: none; }
+svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .grid { stroke: var(--grid); stroke-width: 1; }
+svg .base { stroke: var(--axis); stroke-width: 1; }
+svg .lbl { fill: var(--ink2); font-size: 12px; }
+svg .val { fill: var(--ink); font-size: 11px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; background: var(--surface); color: var(--ink2); padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--sel); color: var(--ink); font-weight: 600; }
+.tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12); display: none; min-width: 150px; }
+.tip .t { color: var(--ink2); margin-bottom: 4px; }
+.tip .r { display: flex; align-items: center; gap: 6px; }
+.tip .r b { font-variant-numeric: tabular-nums; }
+.tip .r span.k { width: 12px; height: 2px; border-radius: 1px; display: inline-block; }
+.tip .r span.n { color: var(--ink2); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink2); font-weight: 600; }
+.note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>대기압 vs HSOH 두께</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="filters">
+    <span class="lab">설비</span>
+    <span id="eqpChips" style="display:contents"></span>
+    <button class="btn" id="allOn">전체 선택</button>
+    <button class="btn" id="allOff">전체 해제</button>
+    <span class="range" id="rangeLabel"></span>
+    <button class="btn" id="rangeReset" hidden>기간 해제</button>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <section class="card">
+    <div class="head"><h2>시간에 따른 대기압과 두께</h2>
+      <span class="hint">아래 그래프에서 좌우로 드래그하면 기간을 선택합니다 (더블클릭: 해제)</span></div>
+    <div id="ts"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <div class="head"><h2>대기압 vs 두께</h2>
+        <div class="seg" id="yMode"><button data-v="dev" aria-pressed="true">설비 평균 대비 편차</button><button data-v="raw" aria-pressed="false">두께 원값</button></div></div>
+      <div id="sc"></div>
+    </section>
+    <section class="card">
+      <div class="head"><h2>설비별 민감도 (Å/hPa)</h2><span class="hint">선택한 기간·설비 기준</span></div>
+      <div id="sens"></div>
+    </section>
+  </div>
+
+  <div class="grid2">
+    <section class="card">
+      <div class="head"><h2>대기압 구간별 두께 편차</h2><span class="hint">막대: 평균, 선: ±1σ</span></div>
+      <div id="bins"></div>
+    </section>
+    <section class="card">
+      <div class="head"><h2>시차 분석</h2><span class="hint">TKIN_TIME 보다 N분 앞선 대기압과의 상관 (전체 데이터 기준)</span></div>
+      <div id="lag"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="head"><h2>요약 표</h2><span class="hint">선택한 기간·설비 기준</span></div>
+    <div id="tbl" style="overflow-x:auto"></div>
+    <p class="note">p-value 는 엑셀 리포트(요약_회귀 시트, 전체 데이터 기준)를 참고하세요.</p>
+  </section>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+const D = __DATA__;
+const NS = "http://www.w3.org/2000/svg";
+const N = D.w.t.length;
+const EQPS = D.eqps;
+const colorOf = e => { const i = EQPS.indexOf(e); return i >= 0 && i < 8 ? `var(--s${i + 1})` : "var(--s0)"; };
+const state = { on: new Set(EQPS), range: null, y: "dev" };
+
+// ---------- 공통 유틸 ----------
+const el = (tag, attrs = {}, parent) => {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "text") n.textContent = v; else if (k === "style") n.style.cssText = v; else n.setAttribute(k, v);
+  }
+  if (parent) parent.appendChild(n);
+  return n;
+};
+const lin = (d0, d1, r0, r1) => { const k = d1 === d0 ? 0 : (r1 - r0) / (d1 - d0); const f = v => r0 + (v - d0) * k; f.inv = p => d0 + (p - r0) / (k || 1); return f; };
+function niceTicks(lo, hi, n = 5) {
+  if (!(hi > lo)) { const c = isFinite(lo) ? lo : 0; return [c]; }
+  const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => (hi - lo) / s <= n) || 10 * mag;
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+const pad2 = v => String(v).padStart(2, "0");
+const fmtDT = ms => { const d = new Date(ms); return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`; };
+const fmtD = ms => { const d = new Date(ms); return `${pad2(d.getUTCMonth() + 1)}/${pad2(d.getUTCDate())}`; };
+const fmtH = ms => { const d = new Date(ms); return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`; };
+function timeTicks(t0, t1, n) {
+  const H = 3600e3, Dd = 24 * H, span = t1 - t0;
+  const steps = [H, 2 * H, 3 * H, 6 * H, 12 * H, Dd, 2 * Dd, 7 * Dd, 14 * Dd, 30 * Dd];
+  const st = steps.find(s => span / s <= n) || 30 * Dd;
+  const out = []; for (let v = Math.ceil(t0 / st) * st; v <= t1; v += st) out.push(v);
+  return { ticks: out, fmt: st >= Dd ? fmtD : (v => (new Date(v).getUTCHours() === 0 ? fmtD(v) : fmtH(v))) };
+}
+const f = (v, d = 2) => (v == null || !isFinite(v)) ? "-" : v.toFixed(d);
+function regress(xs, ys) {
+  const n = xs.length; if (n < 3) return { n, slope: NaN, icpt: NaN, r: NaN, r2: NaN };
+  let mx = 0, my = 0; for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; } mx /= n; my /= n;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  if (sxx === 0) return { n, slope: NaN, icpt: NaN, r: NaN, r2: NaN };
+  const slope = sxy / sxx, r = syy === 0 ? 0 : sxy / Math.sqrt(sxx * syy);
+  return { n, slope, icpt: my - slope * mx, r, r2: r * r, mean: my, sd: Math.sqrt(syy / Math.max(n - 1, 1)) };
+}
+
+// ---------- 툴팁 ----------
+const tip = document.getElementById("tip");
+function showTip(ev, title, rows) {
+  tip.replaceChildren();
+  const t = document.createElement("div"); t.className = "t"; t.textContent = title; tip.appendChild(t);
+  for (const [color, val, name] of rows) {
+    const r = document.createElement("div"); r.className = "r";
+    if (color) { const k = document.createElement("span"); k.className = "k"; k.style.background = color; r.appendChild(k); }
+    const b = document.createElement("b"); b.textContent = val; r.appendChild(b);
+    const s = document.createElement("span"); s.className = "n"; s.textContent = name; r.appendChild(s);
+    tip.appendChild(r);
+  }
+  tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + w > innerWidth - 8) x = ev.clientX - w - 14;
+  if (y + h > innerHeight - 8) y = ev.clientY - h - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const hideTip = () => { tip.style.display = "none"; };
+
+// ---------- 데이터 선택 ----------
+function selected() {
+  const idx = [];
+  for (let i = 0; i < N; i++) {
+    if (!state.on.has(D.w.eqp[i])) continue;
+    if (state.range && (D.w.t[i] < state.range[0] || D.w.t[i] > state.range[1])) continue;
+    idx.push(i);
+  }
+  const sum = {}, cnt = {};
+  for (const i of idx) { const e = D.w.eqp[i]; sum[e] = (sum[e] || 0) + D.w.thk[i]; cnt[e] = (cnt[e] || 0) + 1; }
+  const dev = new Map(); for (const i of idx) { const e = D.w.eqp[i]; dev.set(i, D.w.thk[i] - sum[e] / cnt[e]); }
+  return { idx, dev };
+}
+
+// ---------- 필터 UI ----------
+const chips = document.getElementById("eqpChips");
+for (const e of EQPS) {
+  const b = document.createElement("button"); b.className = "chip"; b.setAttribute("aria-pressed", "true");
+  const k = document.createElement("span"); k.className = "key"; k.style.background = colorOf(e); b.appendChild(k);
+  b.appendChild(document.createTextNode(e));
+  b.onclick = () => { state.on.has(e) ? state.on.delete(e) : state.on.add(e); b.setAttribute("aria-pressed", state.on.has(e)); render(); };
+  chips.appendChild(b);
+}
+const setAll = on => { state.on = new Set(on ? EQPS : []); chips.querySelectorAll(".chip").forEach(c => c.setAttribute("aria-pressed", on)); render(); };
+document.getElementById("allOn").onclick = () => setAll(true);
+document.getElementById("allOff").onclick = () => setAll(false);
+document.getElementById("rangeReset").onclick = () => { state.range = null; render(); };
+document.querySelectorAll("#yMode button").forEach(b => b.onclick = () => {
+  state.y = b.dataset.v; document.querySelectorAll("#yMode button").forEach(x => x.setAttribute("aria-pressed", x === b)); render();
+});
+document.getElementById("sub").textContent = D.meta.sub;
+
+// ---------- KPI ----------
+function renderKpis(S) {
+  const xs = S.idx.map(i => D.w.p[i]), ys = S.idx.map(i => S.dev.get(i));
+  const r = regress(xs, ys);
+  const pmin = Math.min(...xs), pmax = Math.max(...xs);
+  const items = [
+    [S.idx.length.toLocaleString(), "웨이퍼 수"],
+    [f(r.slope, 2) + " Å/hPa", "대기압 1 hPa 당 두께 변화 (설비 평균 제거)"],
+    [f(r.r2, 3), "R²"],
+    [xs.length ? `${f(pmin, 1)} ~ ${f(pmax, 1)}` : "-", "대기압 범위 (hPa)"],
+  ];
+  const box = document.getElementById("kpis"); box.replaceChildren();
+  for (const [v, l] of items) {
+    const d = document.createElement("div"); d.className = "kpi";
+    const a = document.createElement("div"); a.className = "v"; a.textContent = v;
+    const b = document.createElement("div"); b.className = "l"; b.textContent = l;
+    d.append(a, b); box.appendChild(d);
+  }
+}
+
+// ---------- 1. 시계열 (위: 대기압, 아래: 두께, x축 공유) ----------
+function renderTS(S) {
+  const box = document.getElementById("ts"); box.replaceChildren();
+  const W = box.clientWidth || 900, m = { l: 56, r: 12 }, h1 = 130, gap = 26, h2 = 220, top = 8;
+  const H = top + h1 + gap + h2 + 26;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, box);
+  const t0 = Math.min(D.p.t[0], ...(N ? [D.w.t[0]] : [])), t1 = Math.max(D.p.t[D.p.t.length - 1], D.w.t[N - 1] || 0);
+  const x = lin(t0, t1, m.l, W - m.r);
+  const pv = D.p.p, plo = Math.min(...pv), phi = Math.max(...pv), pp = (phi - plo) * 0.08 || 1;
+  const y1 = lin(plo - pp, phi + pp, top + h1, top);
+  const ys2v = S.idx.map(i => D.w.thk[i]);
+  const tlo = ys2v.length ? Math.min(...ys2v) : 0, thi = ys2v.length ? Math.max(...ys2v) : 1, tp = (thi - tlo) * 0.08 || 1;
+  const b2 = top + h1 + gap, y2 = lin(tlo - tp, thi + tp, b2 + h2, b2);
+  const tt = timeTicks(t0, t1, Math.max(4, Math.floor(W / 110)));
+  // 선택 기간
+  if (state.range) el("rect", { x: x(state.range[0]), y: top, width: Math.max(1, x(state.range[1]) - x(state.range[0])), height: b2 + h2 - top, style: "fill:var(--sel)" }, svg);
+  // 축/그리드
+  for (const v of niceTicks(plo - pp, phi + pp, 4)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y1(v), y2: y1(v) }, svg); el("text", { x: m.l - 6, y: y1(v) + 4, "text-anchor": "end", text: f(v, 1) }, svg); }
+  for (const v of niceTicks(tlo - tp, thi + tp, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y2(v), y2: y2(v) }, svg); el("text", { x: m.l - 6, y: y2(v) + 4, "text-anchor": "end", text: f(v, 0) }, svg); }
+  for (const v of tt.ticks) el("text", { x: x(v), y: b2 + h2 + 16, "text-anchor": "middle", text: tt.fmt(v) }, svg);
+  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: top + h1, y2: top + h1 }, svg);
+  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: b2 + h2, y2: b2 + h2 }, svg);
+  el("text", { class: "lbl", x: m.l, y: top - 0, dy: "-2", text: "대기압 (hPa)" }, svg);
+  el("text", { class: "lbl", x: m.l, y: b2 - 4, text: "두께 (Å)" }, svg);
+  // 대기압 선
+  let d = ""; for (let i = 0; i < D.p.t.length; i++) d += (i ? "L" : "M") + x(D.p.t[i]).toFixed(1) + "," + y1(pv[i]).toFixed(1);
+  el("path", { d, style: "fill:none;stroke:var(--s1);stroke-width:2;stroke-linejoin:round" }, svg);
+  // 두께 점
+  for (const i of S.idx) el("circle", { cx: x(D.w.t[i]), cy: y2(D.w.thk[i]), r: 3, style: `fill:${colorOf(D.w.eqp[i])};stroke:var(--surface);stroke-width:1` }, svg);
+  // 크로스헤어 + 브러시
+  const cross = el("line", { x1: 0, x2: 0, y1: top, y2: b2 + h2, style: "stroke:var(--ink2);stroke-width:1;display:none" }, svg);
+  const dot = el("circle", { r: 4, style: "fill:var(--s1);stroke:var(--surface);stroke-width:2;display:none" }, svg);
+  const ring = el("circle", { r: 6, style: "fill:none;stroke:var(--ink);stroke-width:1.5;display:none" }, svg);
+  const brush = el("rect", { y: top, height: b2 + h2 - top, width: 0, style: "fill:var(--sel);stroke:var(--s1);stroke-width:1;display:none" }, svg);
+  const hit = el("rect", { x: m.l, y: top, width: W - m.l - m.r, height: b2 + h2 - top, style: "fill:transparent;cursor:crosshair" }, svg);
+  const toX = ev => { const r = svg.getBoundingClientRect(); return (ev.clientX - r.left) * W / r.width; };
+  const toY = ev => { const r = svg.getBoundingClientRect(); return (ev.clientY - r.top) * H / r.height; };
+  let drag = null;
+  hit.addEventListener("pointerdown", ev => { drag = toX(ev); hit.setPointerCapture(ev.pointerId); });
+  hit.addEventListener("pointermove", ev => {
+    const px = Math.min(Math.max(toX(ev), m.l), W - m.r), py = toY(ev);
+    if (drag != null) {
+      brush.style.display = ""; brush.setAttribute("x", Math.min(drag, px)); brush.setAttribute("width", Math.abs(px - drag));
+      hideTip(); return;
+    }
+    const tv = x.inv(px);
+    if (py > b2 - 6) { // 아래 패널: 가장 가까운 웨이퍼
+      let best = -1, bd = 400;
+      for (const i of S.idx) { const dx = x(D.w.t[i]) - px, dy = y2(D.w.thk[i]) - py, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = i; } }
+      cross.style.display = "none"; dot.style.display = "none";
+      if (best < 0) { ring.style.display = "none"; hideTip(); return; }
+      ring.style.display = ""; ring.setAttribute("cx", x(D.w.t[best])); ring.setAttribute("cy", y2(D.w.thk[best]));
+      showTip(ev, fmtDT(D.w.t[best]) + " (TKIN)", [
+        [colorOf(D.w.eqp[best]), f(D.w.thk[best], 1) + " Å", "두께"],
+        [null, f(D.w.p[best], 2) + " hPa", "대기압"],
+        [null, D.w.eqp[best], "설비"], [null, D.w.lot[best], "LOT"], [null, D.w.wafer[best], "WAFER"]]);
+      return;
+    }
+    ring.style.display = "none";
+    let lo = 0, hi = D.p.t.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (D.p.t[mid] < tv) lo = mid; else hi = mid; }
+    const k = Math.abs(D.p.t[lo] - tv) < Math.abs(D.p.t[hi] - tv) ? lo : hi;
+    const cx = x(D.p.t[k]);
+    cross.style.display = ""; cross.setAttribute("x1", cx); cross.setAttribute("x2", cx);
+    dot.style.display = ""; dot.setAttribute("cx", cx); dot.setAttribute("cy", y1(pv[k]));
+    showTip(ev, fmtDT(D.p.t[k]), [["var(--s1)", f(pv[k], 2) + " hPa", "대기압"]]);
+  });
+  hit.addEventListener("pointerup", ev => {
+    if (drag == null) return;
+    const px = Math.min(Math.max(toX(ev), m.l), W - m.r), a = Math.min(drag, px), b = Math.max(drag, px);
+    drag = null; brush.style.display = "none";
+    if (b - a > 6) { state.range = [x.inv(a), x.inv(b)]; render(); }
+  });
+  hit.addEventListener("dblclick", () => { state.range = null; render(); });
+  hit.addEventListener("pointerleave", () => { if (drag == null) { cross.style.display = dot.style.display = ring.style.display = "none"; hideTip(); } });
+}
+
+// ---------- 2. 산점도 ----------
+function renderScatter(S) {
+  const box = document.getElementById("sc"); box.replaceChildren();
+  const W = box.clientWidth || 500, H = 340, m = { l: 52, r: 70, t: 10, b: 36 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, box);
+  const yv = i => state.y === "dev" ? S.dev.get(i) : D.w.thk[i];
+  if (!S.idx.length) { el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", text: "선택된 데이터가 없습니다" }, svg); return; }
+  const xs = S.idx.map(i => D.w.p[i]), ys = S.idx.map(yv);
+  const xlo = Math.min(...xs), xhi = Math.max(...xs), xp = (xhi - xlo) * 0.05 || 0.5;
+  const ylo = Math.min(...ys), yhi = Math.max(...ys), yp = (yhi - ylo) * 0.08 || 1;
+  const x = lin(xlo - xp, xhi + xp, m.l, W - m.r), y = lin(ylo - yp, yhi + yp, H - m.b, m.t);
+  for (const v of niceTicks(ylo - yp, yhi + yp, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: f(v, state.y === "dev" ? 0 : 0) }, svg); }
+  for (const v of niceTicks(xlo - xp, xhi + xp, 6)) el("text", { x: x(v), y: H - m.b + 16, "text-anchor": "middle", text: f(v, 1) }, svg);
+  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b }, svg);
+  el("text", { class: "lbl", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", text: "대기압 (hPa)" }, svg);
+  el("text", { class: "lbl", x: 4, y: m.t - 2, text: state.y === "dev" ? "Δ 두께 (Å)" : "두께 (Å)" }, svg);
+  for (const i of S.idx) el("circle", { cx: x(D.w.p[i]), cy: y(yv(i)), r: 3.5, style: `fill:${colorOf(D.w.eqp[i])};fill-opacity:0.75;stroke:var(--surface);stroke-width:1` }, svg);
+  // 설비별 회귀선 + 직접 라벨
+  const on = EQPS.filter(e => state.on.has(e));
+  const labels = [];
+  for (const e of on) {
+    const ii = S.idx.filter(i => D.w.eqp[i] === e), r = regress(ii.map(i => D.w.p[i]), ii.map(yv));
+    if (!isFinite(r.slope)) continue;
+    const a = Math.min(...ii.map(i => D.w.p[i])), b = Math.max(...ii.map(i => D.w.p[i]));
+    el("line", { x1: x(a), y1: y(r.icpt + r.slope * a), x2: x(b), y2: y(r.icpt + r.slope * b), style: `stroke:${colorOf(e)};stroke-width:2` }, svg);
+    labels.push({ e, y: y(r.icpt + r.slope * b), x: x(b), s: r.slope });
+  }
+  if (on.length <= 4) {
+    labels.sort((a, b) => a.y - b.y); for (let k = 1; k < labels.length; k++) if (labels[k].y - labels[k - 1].y < 13) labels[k].y = labels[k - 1].y + 13;
+    for (const L of labels) el("text", { class: "val", x: W - m.r + 6, y: L.y + 4, text: `${L.e} ${f(L.s, 2)}` }, svg);
+  }
+  const ring = el("circle", { r: 6, style: "fill:none;stroke:var(--ink);stroke-width:1.5;display:none" }, svg);
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, style: "fill:transparent" }, svg);
+  hit.addEventListener("pointermove", ev => {
+    const rc = svg.getBoundingClientRect(), px = (ev.clientX - rc.left) * W / rc.width, py = (ev.clientY - rc.top) * H / rc.height;
+    let best = -1, bd = 400;
+    for (const i of S.idx) { const dx = x(D.w.p[i]) - px, dy = y(yv(i)) - py, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = i; } }
+    if (best < 0) { ring.style.display = "none"; hideTip(); return; }
+    ring.style.display = ""; ring.setAttribute("cx", x(D.w.p[best])); ring.setAttribute("cy", y(yv(best)));
+    showTip(ev, `${D.w.eqp[best]} · ${D.w.wafer[best]}`, [
+      [colorOf(D.w.eqp[best]), f(yv(best), 1) + " Å", state.y === "dev" ? "편차" : "두께"],
+      [null, f(D.w.p[best], 2) + " hPa", "대기압"], [null, fmtDT(D.w.t[best]), "TKIN"]]);
+  });
+  hit.addEventListener("pointerleave", () => { ring.style.display = "none"; hideTip(); });
+}
+
+// ---------- 3. 설비별 민감도 ----------
+function eqpStats(S) {
+  return EQPS.filter(e => state.on.has(e)).map(e => {
+    const ii = S.idx.filter(i => D.w.eqp[i] === e);
+    return { e, ...regress(ii.map(i => D.w.p[i]), ii.map(i => D.w.thk[i])) };
+  });
+}
+function renderSens(S) {
+  const box = document.getElementById("sens"); box.replaceChildren();
+  const st = eqpStats(S).filter(s => isFinite(s.slope));
+  const W = box.clientWidth || 500, rowH = 30, m = { l: 80, r: 90, t: 6, b: 24 }, H = Math.max(120, m.t + m.b + st.length * rowH);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, box);
+  if (!st.length) { el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", text: "계산할 수 있는 설비가 없습니다 (설비당 3장 이상 필요)" }, svg); return; }
+  const lo = Math.min(0, ...st.map(s => s.slope)), hi = Math.max(0, ...st.map(s => s.slope)), p = (hi - lo) * 0.05 || 1;
+  const x = lin(lo - (lo < 0 ? p : 0), hi + p, m.l, W - m.r);
+  for (const v of niceTicks(lo, hi, 5)) { el("line", { class: "grid", x1: x(v), x2: x(v), y1: m.t, y2: H - m.b }, svg); el("text", { x: x(v), y: H - 6, "text-anchor": "middle", text: f(v, 1) }, svg); }
+  el("line", { class: "base", x1: x(0), x2: x(0), y1: m.t, y2: H - m.b }, svg);
+  st.forEach((s, k) => {
+    const yc = m.t + k * rowH + rowH / 2, a = x(Math.min(0, s.slope)), b = x(Math.max(0, s.slope));
+    el("text", { class: "lbl", x: m.l - 8, y: yc + 4, "text-anchor": "end", text: s.e }, svg);
+    const bar = el("rect", { x: a, y: yc - 9, width: Math.max(2, b - a), height: 18, rx: 4, style: `fill:${colorOf(s.e)}` }, svg);
+    el("text", { class: "val", x: s.slope >= 0 ? b + 6 : a - 6, y: yc + 4, "text-anchor": s.slope >= 0 ? "start" : "end", text: `${f(s.slope, 2)}  (R² ${f(s.r2, 2)})` }, svg);
+    const h = el("rect", { x: m.l, y: yc - rowH / 2, width: W - m.l - m.r, height: rowH, style: "fill:transparent" }, svg);
+    h.addEventListener("pointermove", ev => { bar.style.opacity = 0.8; showTip(ev, s.e, [[colorOf(s.e), f(s.slope, 3) + " Å/hPa", "기울기"], [null, f(s.r2, 3), "R²"], [null, String(s.n), "웨이퍼 수"]]); });
+    h.addEventListener("pointerleave", () => { bar.style.opacity = 1; hideTip(); });
+  });
+}
+
+// ---------- 4. 대기압 구간별 ----------
+function renderBins(S) {
+  const box = document.getElementById("bins"); box.replaceChildren();
+  const W = box.clientWidth || 500, H = 280, m = { l: 52, r: 12, t: 18, b: 40 }, bw = D.meta.bin;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, box);
+  const g = new Map();
+  for (const i of S.idx) { const k = Math.floor(D.w.p[i] / bw) * bw; if (!g.has(k)) g.set(k, []); g.get(k).push(S.dev.get(i)); }
+  const bins = [...g.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => {
+    const n = v.length, mean = v.reduce((a, b) => a + b, 0) / n, sd = n > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : 0;
+    return { k, n, mean, sd };
+  });
+  if (!bins.length) { el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", text: "선택된 데이터가 없습니다" }, svg); return; }
+  const lo = Math.min(0, ...bins.map(b => b.mean - b.sd)), hi = Math.max(0, ...bins.map(b => b.mean + b.sd)), p = (hi - lo) * 0.08 || 1;
+  const y = lin(lo - p, hi + p, H - m.b, m.t), slot = (W - m.l - m.r) / bins.length, bwid = Math.max(4, Math.min(48, slot - 6));
+  for (const v of niceTicks(lo - p, hi + p, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: f(v, 0) }, svg); }
+  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: y(0), y2: y(0) }, svg);
+  el("text", { class: "lbl", x: 4, y: m.t - 6, text: "Δ 두께 (Å)" }, svg);
+  el("text", { class: "lbl", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", text: `대기압 구간 시작값 (hPa, 폭 ${bw})` }, svg);
+  const every = Math.ceil(bins.length / Math.max(1, Math.floor((W - m.l - m.r) / 44)));
+  bins.forEach((b, k) => {
+    const cx = m.l + slot * (k + 0.5), a = y(Math.max(0, b.mean)), z = y(Math.min(0, b.mean));
+    const bar = el("rect", { x: cx - bwid / 2, y: a, width: bwid, height: Math.max(1, z - a), rx: 3, style: "fill:var(--s1)" }, svg);
+    el("line", { x1: cx, x2: cx, y1: y(b.mean - b.sd), y2: y(b.mean + b.sd), style: "stroke:var(--ink2);stroke-width:1.5" }, svg);
+    if (k % every === 0) el("text", { x: cx, y: H - m.b + 16, "text-anchor": "middle", text: f(b.k, bw < 1 ? 1 : 0) }, svg);
+    const h = el("rect", { x: cx - slot / 2, y: m.t, width: slot, height: H - m.t - m.b, style: "fill:transparent" }, svg);
+    h.addEventListener("pointermove", ev => { bar.style.opacity = 0.75; showTip(ev, `${f(b.k, 1)} ~ ${f(b.k + bw, 1)} hPa`, [["var(--s1)", f(b.mean, 2) + " Å", "평균 편차"], [null, f(b.sd, 2) + " Å", "σ"], [null, String(b.n), "웨이퍼 수"]]); });
+    h.addEventListener("pointerleave", () => { bar.style.opacity = 1; hideTip(); });
+  });
+}
+
+// ---------- 5. 시차 분석 ----------
+function renderLag() {
+  const box = document.getElementById("lag"); box.replaceChildren();
+  const L = D.lag.filter(r => r.r != null);
+  const W = box.clientWidth || 500, H = 280, m = { l: 52, r: 16, t: 18, b: 40 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, box);
+  if (!L.length) { el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", text: "데이터 없음" }, svg); return; }
+  const xlo = L[0].lag, xhi = L[L.length - 1].lag, rs = L.map(r => r.r);
+  const lo = Math.min(...rs), hi = Math.max(...rs), p = (hi - lo) * 0.15 || 0.05;
+  const x = lin(xlo, xhi, m.l, W - m.r), y = lin(lo - p, hi + p, H - m.b, m.t);
+  for (const v of niceTicks(lo - p, hi + p, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, svg); el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", text: f(v, 2) }, svg); }
+  for (const v of niceTicks(xlo, xhi, 6)) el("text", { x: x(v), y: H - m.b + 16, "text-anchor": "middle", text: String(v) }, svg);
+  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b }, svg);
+  el("text", { class: "lbl", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", text: "시차 (분, TKIN_TIME 이전)" }, svg);
+  el("text", { class: "lbl", x: 4, y: m.t - 6, text: "Pearson r" }, svg);
+  el("path", { d: L.map((r, k) => (k ? "L" : "M") + x(r.lag) + "," + y(r.r)).join(""), style: "fill:none;stroke:var(--s1);stroke-width:2" }, svg);
+  const best = L.reduce((a, b) => Math.abs(b.r) > Math.abs(a.r) ? b : a);
+  el("circle", { cx: x(best.lag), cy: y(best.r), r: 5, style: "fill:var(--s1);stroke:var(--surface);stroke-width:2" }, svg);
+  el("text", { class: "val", x: x(best.lag) + 8, y: y(best.r) - 8, text: `최대 |r| ${f(best.r, 3)} @ ${best.lag}분` }, svg);
+  const cross = el("line", { y1: m.t, y2: H - m.b, style: "stroke:var(--ink2);stroke-width:1;display:none" }, svg);
+  const dot = el("circle", { r: 4, style: "fill:var(--s1);stroke:var(--surface);stroke-width:2;display:none" }, svg);
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, style: "fill:transparent" }, svg);
+  hit.addEventListener("pointermove", ev => {
+    const rc = svg.getBoundingClientRect(), px = (ev.clientX - rc.left) * W / rc.width;
+    const r = L.reduce((a, b) => Math.abs(x(b.lag) - px) < Math.abs(x(a.lag) - px) ? b : a);
+    cross.style.display = dot.style.display = ""; cross.setAttribute("x1", x(r.lag)); cross.setAttribute("x2", x(r.lag));
+    dot.setAttribute("cx", x(r.lag)); dot.setAttribute("cy", y(r.r));
+    showTip(ev, `시차 ${r.lag}분`, [["var(--s1)", f(r.r, 3), "Pearson r"], [null, f(r.slope, 2) + " Å/hPa", "기울기"], [null, String(r.n), "웨이퍼 수"]]);
+  });
+  hit.addEventListener("pointerleave", () => { cross.style.display = dot.style.display = "none"; hideTip(); });
+}
+
+// ---------- 표 ----------
+function renderTable(S) {
+  const rows = [];
+  const all = regress(S.idx.map(i => D.w.p[i]), S.idx.map(i => S.dev.get(i)));
+  rows.push(["전체 (설비 평균 제거)", all]);
+  for (const s of eqpStats(S)) rows.push(["설비 " + s.e, s]);
+  const t = document.createElement("table"), hd = t.createTHead().insertRow();
+  for (const h of ["구분", "N", "기울기 (Å/hPa)", "R²", "Pearson r", "두께 평균 (Å)", "두께 σ (Å)"]) { const th = document.createElement("th"); th.textContent = h; hd.appendChild(th); }
+  const tb = t.createTBody();
+  for (const [name, r] of rows) {
+    const tr = tb.insertRow();
+    for (const v of [name, String(r.n), f(r.slope, 3), f(r.r2, 3), f(r.r, 3), name.startsWith("전체") ? "-" : f(r.mean, 1), name.startsWith("전체") ? "-" : f(r.sd, 2)]) tr.insertCell().textContent = v;
+  }
+  document.getElementById("tbl").replaceChildren(t);
+}
+
+// ---------- 전체 그리기 ----------
+function render() {
+  const S = selected();
+  const rl = document.getElementById("rangeLabel"), rb = document.getElementById("rangeReset");
+  rl.textContent = state.range ? `기간: ${fmtDT(state.range[0])} ~ ${fmtDT(state.range[1])}` : "";
+  rb.hidden = !state.range;
+  renderKpis(S); renderTS(S); renderScatter(S); renderSens(S); renderBins(S); renderLag(); renderTable(S);
+}
+let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(render, 150); });
+render();
+</script>
+</body>
+</html>
+'''
+
+
+# ============================================================
 # 엑셀
 # ============================================================
 def write_excel(path, df, unmatched, summary, bins, lag, charts):
@@ -654,6 +1187,8 @@ def main(argv=None):
 
     print("[5/5] 결과 저장")
     charts = make_charts(df, pressure, summary, lag, out_dir)
+    html = out_dir / "pressure_vs_soh_report.html"
+    write_html(html, df, pressure, lag)
     xlsx = out_dir / "pressure_vs_soh_report.xlsx"
     try:
         write_excel(xlsx, df, unmatched, summary, bins, lag, charts)
@@ -664,7 +1199,8 @@ def main(argv=None):
     print("\n=== 대기압 1 hPa 당 두께 변화 ===")
     print(summary[["구분", "N", "기울기(Å/hPa)", "R²", "p-value"]]
           .to_string(index=False, float_format=lambda v: f"{v:.4g}"))
-    print(f"\n결과: {xlsx}")
+    print(f"\n결과: {html}  <- 브라우저로 열기 (인터랙티브)")
+    print(f"      {xlsx}")
     for f in charts:
         print(f"      {f}")
 

@@ -32,6 +32,9 @@
    - 평소 `from bigdataquery import *` 가 되는 파이썬 환경에서 실행해야 한다.
    - 기간만 바꿔 실행: `python analyze.py --from 2026-09-01 --to 2026-09-30`
 3. 결과: `output/`
+   - `pressure_vs_soh_report.html` : **인터랙티브 리포트** (브라우저로 열기, 인터넷/설치 불필요)
+     - 설비 켜기/끄기, 시계열에서 드래그로 기간 선택 → 모든 차트·표가 다시 계산됨
+     - 점/막대/선에 마우스를 올리면 LOT, WAFER, 대기압, 두께 표시
    - `pressure_vs_soh_report.xlsx` : 그래프 / 요약_회귀 / 대기압구간별 / 시차분석 / 매칭데이터 / 매칭실패 / 설정
    - `1_timeseries.png` ~ `5_lag.png`
    - `raw_pressure.csv`, `raw_meas.csv`, `raw_proc.csv` : 조회 원본
