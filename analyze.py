@@ -838,7 +838,7 @@ const AX = {
   bins: { y: ["Δ 두께 (Å)"] },
   lag: { y: ["Pearson r"] },
 };
-state.ax = {}; state.auto = {}; state.legendPos = "top"; state.tsHide = new Set();
+state.ax = {}; state.auto = {}; state.legendPos = "top"; state.tsHide = new Set(); state.tsLayout = "overlay";
 const toInputTime = ms => new Date(ms).toISOString().slice(0, 16);
 const fromInputTime = v => (v ? Date.parse(v + ":00Z") : null);
 function rng(c, a, lo, hi) {
@@ -887,6 +887,14 @@ for (const [cid, axes] of Object.entries(AX)) {
     }
     sel.onchange = () => { state.legendPos = sel.value; render(); };
     g.appendChild(sel); box.appendChild(g);
+    const g2 = document.createElement("span"); g2.className = "grp";
+    const b2 = document.createElement("b"); b2.textContent = "배치"; g2.appendChild(b2);
+    const sel2 = document.createElement("select");
+    for (const [v, t] of [["overlay", "겹치기 (왼쪽 두께 / 오른쪽 대기압)"], ["split", "위아래 분리"]]) {
+      const o = document.createElement("option"); o.value = v; o.textContent = t; sel2.appendChild(o);
+    }
+    sel2.onchange = () => { state.tsLayout = sel2.value; render(); };
+    g2.appendChild(sel2); box.appendChild(g2);
   }
   const rs = document.createElement("button"); rs.className = "btn"; rs.textContent = "자동으로";
   rs.onclick = () => {
@@ -904,7 +912,7 @@ function updatePlaceholders() {
   });
 }
 
-// ---------- 1. 시계열 (위: 대기압, 아래: 두께, x축 공유) ----------
+// ---------- 1. 시계열 (겹치기: 왼쪽 두께/오른쪽 대기압, 또는 위아래 분리) ----------
 let legendSig = "";
 function renderLegend() {
   // 버튼을 매번 새로 만들면 입력칸 change 직후의 클릭이 사라지므로, 항목이 바뀔 때만 다시 만든다
@@ -928,49 +936,75 @@ function renderLegend() {
 function renderTS(S) {
   renderLegend();
   const box = document.getElementById("ts"); box.replaceChildren();
-  const W = box.clientWidth || 900, m = { l: 56, r: 12 }, h1 = 130, gap = 26, h2 = 220, top = 8;
-  const H = top + h1 + gap + h2 + 26, b2 = top + h1 + gap, pw = W - m.l - m.r;
+  const ov = state.tsLayout === "overlay";  // 겹치기: 왼쪽 두께 / 오른쪽 대기압
+  const W = box.clientWidth || 900, m = { l: 56, r: ov ? 60 : 12 }, pw = W - m.l - m.r;
+  let pT, pBt, tT, tBt;
+  if (ov) { pT = tT = 18; pBt = tBt = 18 + 340; } else { pT = 8; pBt = 138; tT = 164; tBt = 384; }
+  const H = tBt + 26, top = Math.min(pT, tT);
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, box);
   const showP = !state.tsHide.has("__p");
   const vis = S.idx.filter(i => !state.tsHide.has(D.w.eqp[i]));
   const t0 = Math.min(D.p.t[0], N ? D.w.t[0] : Infinity), t1 = Math.max(D.p.t[D.p.t.length - 1], N ? D.w.t[N - 1] : -Infinity);
   const [tA, tB] = rng("ts", "t", t0, t1), x = lin(tA, tB, m.l, W - m.r);
   const pv = D.p.p, plo = Math.min(...pv), phi = Math.max(...pv), pp = (phi - plo) * 0.08 || 1;
-  const [pA, pB] = rng("ts", "p", plo - pp, phi + pp), y1 = lin(pA, pB, top + h1, top);
+  const [pA, pB] = rng("ts", "p", plo - pp, phi + pp), y1 = lin(pA, pB, pBt, pT);
   const tv = vis.map(i => D.w.thk[i]);
   const tlo = tv.length ? Math.min(...tv) : 0, thi = tv.length ? Math.max(...tv) : 1, tp = (thi - tlo) * 0.08 || 1;
-  const [yA, yB] = rng("ts", "y", tlo - tp, thi + tp), y2 = lin(yA, yB, b2 + h2, b2);
+  const [yA, yB] = rng("ts", "y", tlo - tp, thi + tp), y2 = lin(yA, yB, tBt, tT);
   const tt = timeTicks(tA, tB, Math.max(4, Math.floor(W / 110)));
-  // 축/그리드
-  for (const v of niceTicks(pA, pB, 4)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y1(v), y2: y1(v) }, svg); el("text", { x: m.l - 6, y: y1(v) + 4, "text-anchor": "end", text: f(v, 1) }, svg); }
+  // 축/그리드 (겹치기일 때 그리드는 왼쪽 두께 축 기준으로만)
   for (const v of niceTicks(yA, yB, 5)) { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y2(v), y2: y2(v) }, svg); el("text", { x: m.l - 6, y: y2(v) + 4, "text-anchor": "end", text: f(v, 0) }, svg); }
-  for (const v of tt.ticks) el("text", { x: x(v), y: b2 + h2 + 16, "text-anchor": "middle", text: tt.fmt(v) }, svg);
-  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: top + h1, y2: top + h1 }, svg);
-  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: b2 + h2, y2: b2 + h2 }, svg);
-  el("text", { class: "lbl", x: m.l, y: top, dy: "-2", text: "대기압 (hPa)" }, svg);
-  el("text", { class: "lbl", x: m.l, y: b2 - 4, text: "두께 (Å)" }, svg);
+  for (const v of niceTicks(pA, pB, ov ? 5 : 4)) {
+    if (ov) el("text", { x: W - m.r + 6, y: y1(v) + 4, "text-anchor": "start", text: f(v, 1) }, svg);
+    else { el("line", { class: "grid", x1: m.l, x2: W - m.r, y1: y1(v), y2: y1(v) }, svg); el("text", { x: m.l - 6, y: y1(v) + 4, "text-anchor": "end", text: f(v, 1) }, svg); }
+  }
+  for (const v of tt.ticks) el("text", { x: x(v), y: tBt + 16, "text-anchor": "middle", text: tt.fmt(v) }, svg);
+  el("line", { class: "base", x1: m.l, x2: W - m.r, y1: tBt, y2: tBt }, svg);
+  if (ov) {
+    el("line", { class: "base", x1: m.l, x2: m.l, y1: tT, y2: tBt }, svg);
+    el("line", { class: "base", x1: W - m.r, x2: W - m.r, y1: pT, y2: pBt }, svg);
+    el("text", { class: "lbl", x: m.l, y: tT - 6, "text-anchor": "end", text: "두께 (Å)" }, svg);
+    el("text", { class: "lbl", x: W - m.r, y: pT - 6, "text-anchor": "start", text: "대기압 (hPa)" }, svg);
+  } else {
+    el("line", { class: "base", x1: m.l, x2: W - m.r, y1: pBt, y2: pBt }, svg);
+    el("text", { class: "lbl", x: m.l, y: pT, dy: "-2", text: "대기압 (hPa)" }, svg);
+    el("text", { class: "lbl", x: m.l, y: tT - 4, text: "두께 (Å)" }, svg);
+  }
   // 선택 기간
   if (state.range) {
-    const gs = clipG(svg, m.l, top, pw, b2 + h2 - top);
-    el("rect", { x: x(state.range[0]), y: top, width: Math.max(1, x(state.range[1]) - x(state.range[0])), height: b2 + h2 - top, style: "fill:var(--sel)" }, gs);
+    const gs = clipG(svg, m.l, top, pw, tBt - top);
+    el("rect", { x: x(state.range[0]), y: top, width: Math.max(1, x(state.range[1]) - x(state.range[0])), height: tBt - top, style: "fill:var(--sel)" }, gs);
   }
   // 대기압 선
   if (showP) {
-    const g1 = clipG(svg, m.l, top, pw, h1);
+    const g1 = clipG(svg, m.l, pT, pw, pBt - pT);
     let d = ""; for (let i = 0; i < D.p.t.length; i++) d += (i ? "L" : "M") + x(D.p.t[i]).toFixed(1) + "," + y1(pv[i]).toFixed(1);
     el("path", { d, style: "fill:none;stroke:var(--ink2);stroke-width:2;stroke-linejoin:round" }, g1);
   }
   // 두께 점
-  const g2 = clipG(svg, m.l, b2, pw, h2);
+  const g2 = clipG(svg, m.l, tT, pw, tBt - tT);
   for (const i of vis) el("circle", { cx: x(D.w.t[i]), cy: y2(D.w.thk[i]), r: 3, style: `fill:${colorOf(D.w.eqp[i])};stroke:var(--surface);stroke-width:1` }, g2);
   // 크로스헤어 + 브러시
-  const cross = el("line", { x1: 0, x2: 0, y1: top, y2: b2 + h2, style: "stroke:var(--muted);stroke-width:1;display:none" }, svg);
+  const cross = el("line", { x1: 0, x2: 0, y1: top, y2: tBt, style: "stroke:var(--muted);stroke-width:1;display:none" }, svg);
   const dot = el("circle", { r: 4, style: "fill:var(--ink2);stroke:var(--surface);stroke-width:2;display:none" }, svg);
   const ring = el("circle", { r: 6, style: "fill:none;stroke:var(--ink);stroke-width:1.5;display:none" }, svg);
-  const brush = el("rect", { y: top, height: b2 + h2 - top, width: 0, style: "fill:var(--sel);stroke:var(--s1);stroke-width:1;display:none" }, svg);
-  const hit = el("rect", { x: m.l, y: top, width: pw, height: b2 + h2 - top, style: "fill:transparent;cursor:crosshair" }, svg);
+  const brush = el("rect", { y: top, height: tBt - top, width: 0, style: "fill:var(--sel);stroke:var(--s1);stroke-width:1;display:none" }, svg);
+  const hit = el("rect", { x: m.l, y: top, width: pw, height: tBt - top, style: "fill:transparent;cursor:crosshair" }, svg);
   const toX = ev => { const r = svg.getBoundingClientRect(); return (ev.clientX - r.left) * W / r.width; };
   const toY = ev => { const r = svg.getBoundingClientRect(); return (ev.clientY - r.top) * H / r.height; };
+  const nearestWafer = (px, py) => {
+    let best = -1, bd = 400;
+    for (const i of vis) { const dx = x(D.w.t[i]) - px, dy = y2(D.w.thk[i]) - py, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = i; } }
+    return best;
+  };
+  const showWafer = (ev, best) => {
+    cross.style.display = "none"; dot.style.display = "none";
+    ring.style.display = ""; ring.setAttribute("cx", x(D.w.t[best])); ring.setAttribute("cy", y2(D.w.thk[best]));
+    showTip(ev, fmtDT(D.w.t[best]) + " (TKIN)", [
+      [colorOf(D.w.eqp[best]), f(D.w.thk[best], 1) + " Å", "두께"],
+      [null, f(D.w.p[best], 2) + " hPa", "대기압"],
+      [null, D.w.eqp[best], "설비"], [null, D.w.lot[best], "LOT"], [null, D.w.wafer[best], "WAFER"]]);
+  };
   let drag = null;
   hit.addEventListener("pointerdown", ev => { drag = toX(ev); hit.setPointerCapture(ev.pointerId); });
   hit.addEventListener("pointermove", ev => {
@@ -979,17 +1013,10 @@ function renderTS(S) {
       brush.style.display = ""; brush.setAttribute("x", Math.min(drag, px)); brush.setAttribute("width", Math.abs(px - drag));
       hideTip(); return;
     }
-    if (py > b2 - 6) { // 아래 패널: 가장 가까운 웨이퍼
-      let best = -1, bd = 400;
-      for (const i of vis) { const dx = x(D.w.t[i]) - px, dy = y2(D.w.thk[i]) - py, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = i; } }
-      cross.style.display = "none"; dot.style.display = "none";
-      if (best < 0) { ring.style.display = "none"; hideTip(); return; }
-      ring.style.display = ""; ring.setAttribute("cx", x(D.w.t[best])); ring.setAttribute("cy", y2(D.w.thk[best]));
-      showTip(ev, fmtDT(D.w.t[best]) + " (TKIN)", [
-        [colorOf(D.w.eqp[best]), f(D.w.thk[best], 1) + " Å", "두께"],
-        [null, f(D.w.p[best], 2) + " hPa", "대기압"],
-        [null, D.w.eqp[best], "설비"], [null, D.w.lot[best], "LOT"], [null, D.w.wafer[best], "WAFER"]]);
-      return;
+    if (ov || py > tT - 6) { // 웨이퍼 점 근처면 웨이퍼 정보
+      const best = nearestWafer(px, py);
+      if (best >= 0) { showWafer(ev, best); return; }
+      if (!ov) { cross.style.display = dot.style.display = ring.style.display = "none"; hideTip(); return; }
     }
     ring.style.display = "none";
     if (!showP) { cross.style.display = dot.style.display = "none"; hideTip(); return; }
