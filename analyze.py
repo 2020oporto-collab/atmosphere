@@ -106,7 +106,7 @@ SOURCES = {"pressure": "쿼리1(대기압)", "meas": "쿼리2(계측)", "proc": 
 # ============================================================
 def _norm(name):
     """컬럼명 비교용: 대소문자, 공백, '_', '-', '.' 차이는 무시 (LOT ID = lot_id = LOT-ID)."""
-    return re.sub(r"[\s_\-.﻿]+", "", str(name)).upper()
+    return re.sub(r"[\s_\-.\ufeff]+", "", str(name)).upper()
 
 
 def _wanted(kind):
