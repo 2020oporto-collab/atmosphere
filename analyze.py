@@ -1291,7 +1291,7 @@ def write_excel(path, df, unmatched, summary, bins, lag, charts):
         return min(max(10, max(len(str(col)), sample or 0) * 1.3), 40)
 
     try:
-        import xlsxwriter  # noqa: F401  (있으면 openpyxl 보다 훨씬 빠름. Anaconda 에 기본 포함)
+        import xlsxwriter  # type: ignore  # noqa: F401  (없어도 됨. 있으면 엑셀 저장이 더 빠름)
         engine = "xlsxwriter"
     except ImportError:
         engine = "openpyxl"
