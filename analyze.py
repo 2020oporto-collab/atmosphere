@@ -19,7 +19,9 @@
 조회 결과/CSV 에 컬럼이 많아도 COLUMNS 에 지정한 컬럼만 추출해서 사용한다.
 """
 import argparse
+import hashlib
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -100,6 +102,9 @@ LAG_STEP_MIN = 15                # 시차 분석 간격(분)
 MIN_N_FOR_STATS = 3              # 통계 계산 최소 웨이퍼 수
 EXCEL_MAX_ROWS = 20000           # 매칭데이터가 이보다 많으면 엑셀 대신 CSV 로 저장 (엑셀 저장이 느려짐)
 MAKE_PNG = True                  # False 면 PNG 그래프 생략 (HTML 리포트로 충분할 때 시간 절약)
+USE_CACHE = True                 # 조회 결과를 날짜별로 cache/ 폴더에 저장, 다음 실행 때 받은 날짜는 재조회 안 함
+CHUNK_DAYS = 7                   # 캐시에 없는 날짜를 한 번에 최대 며칠씩 묶어서 조회할지
+PARALLEL_QUERIES = True          # 쿼리2(계측)와 쿼리3(공정)을 동시에 조회 (쿼리3 에 {lots} 를 쓰면 자동으로 순서대로)
 
 ENCODINGS = ("utf-8-sig", "cp949", "euc-kr", "utf-8")
 ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
@@ -254,6 +259,7 @@ def run_query(sql, name):
     except ImportError:
         raise SystemExit("[오류] bigdataquery 를 불러올 수 없습니다. "
                          "평소 getData 를 쓰던 파이썬 환경(인터프리터)에서 실행하세요.")
+    t0 = time.perf_counter()
     try:
         df = getData(sql)
     except Exception as e:
@@ -261,24 +267,99 @@ def run_query(sql, name):
     if df is None:
         raise SystemExit(f"[오류] {name} 조회 결과가 없습니다.\n--- SQL ---\n{sql}")
     df = df if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
-    print(f"  {name}: {len(df)}행 조회")
+    print(f"  {name}: {len(df):,}행 조회, {time.perf_counter() - t0:.1f}초")
     return df
 
 
+# ---------- 날짜별 캐시 ----------
+CACHE_DIR = ROOT / "cache"
+TIME_KEY = {"pressure": "time", "meas": "meas_time", "proc": "time"}  # 날짜로 나눌 때 쓰는 컬럼
+
+
+def _raw_col(df, kind, key):
+    """조회 결과(df)에서 COLUMNS[kind][key] 에 해당하는 실제 컬럼명."""
+    want = COLUMNS[kind].get(key)
+    if not want:
+        return None
+    return next((c for c in df.columns if _norm(c) == _norm(want)), None)
+
+
+def _day_groups(days):
+    """연속된 날짜를 CHUNK_DAYS 이하 묶음으로."""
+    groups, cur = [], []
+    for d in days:
+        if cur and (d - cur[-1] != pd.Timedelta(days=1) or len(cur) >= CHUNK_DAYS):
+            groups.append(cur)
+            cur = []
+        cur.append(d)
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def fetch_cached(kind, sql, start, end, lots=None):
+    """[start, end) 기간을 조회. 캐시에 있는 날짜는 파일에서 읽고, 없는 날짜만 getData 로 조회."""
+    name = SOURCES[kind]
+    can_cache = USE_CACHE and lots is None and "{lots}" not in sql and COLUMNS[kind].get(TIME_KEY[kind])
+    if not can_cache:
+        return run_query(render_sql(sql, start, end, lots), name)
+
+    cdir = CACHE_DIR / f"{kind}_{hashlib.md5(sql.encode('utf-8')).hexdigest()[:8]}"  # SQL 이 바뀌면 새 캐시
+    cdir.mkdir(parents=True, exist_ok=True)
+    today = pd.Timestamp.now().floor("D")
+    days = list(pd.date_range(start.floor("D"), (end - pd.Timedelta(seconds=1)).floor("D"), freq="D"))
+    path = lambda d: cdir / f"{d:%Y%m%d}.pkl"
+    cached = [d for d in days if d < today and path(d).exists()]  # 오늘 이후는 데이터가 늘 수 있어 항상 재조회
+    missing = [d for d in days if d not in set(cached)]
+    print(f"  {name}: 캐시 {len(cached)}일 / 새로 조회 {len(missing)}일")
+
+    frames = [pd.read_pickle(path(d)) for d in cached]
+    for g in _day_groups(missing):
+        df = run_query(render_sql(sql, g[0], g[-1] + pd.Timedelta(days=1)), f"{name} {g[0]:%m/%d}~{g[-1]:%m/%d}")
+        col = _raw_col(df, kind, TIME_KEY[kind])
+        if col is None:  # 시간 컬럼을 못 찾으면 캐시 없이 그대로 사용 (아래 pick_columns 에서 오류 안내)
+            frames.append(df)
+            continue
+        day = parse_time(df[col]).dt.floor("D")
+        for d in g:
+            part = df[day == d]
+            if d < today:
+                part.to_pickle(path(d))
+        frames.append(df)
+    raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    # 날짜 단위로 받았으므로 요청 기간 [start, end) 으로 다시 자른다
+    col = _raw_col(raw, kind, TIME_KEY[kind]) if len(raw) else None
+    if col is not None:
+        t = parse_time(raw[col])
+        raw = raw[t.isna() | ((t >= start) & (t < end))].reset_index(drop=True)
+    return raw
+
+
 def _fetch(kind, sql, start, end, out_dir, lots=None):
-    df = run_query(render_sql(sql, start, end, lots), SOURCES[kind])
+    df = fetch_cached(kind, sql, start, end, lots)
     df.to_csv(out_dir / f"raw_{kind}.csv", index=False, encoding="utf-8-sig")
     return pick_columns(df, kind, f"{SOURCES[kind]} 조회 결과")
 
 
 def fetch_from_query(start, end, out_dir):
-    """쿼리2 -> 쿼리3 -> 쿼리1 순서로 조회 (앞 결과로 다음 조회 범위를 정한다)."""
-    meas = _fetch("meas", SQL_MEAS, start, end, out_dir)
+    """쿼리2·쿼리3 조회 후 쿼리1 조회 (쿼리1 범위는 쿼리3 의 TKIN_TIME 으로 정한다)."""
+    p_start3 = start - pd.Timedelta(days=PROC_LOOKBACK_DAYS)
+    if PARALLEL_QUERIES and "{lots}" not in SQL_PROC:
+        from concurrent.futures import ThreadPoolExecutor
+        print("  쿼리2(계측), 쿼리3(공정) 동시 조회")
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_meas = ex.submit(_fetch, "meas", SQL_MEAS, start, end, out_dir)
+            f_proc = ex.submit(_fetch, "proc", SQL_PROC, p_start3, end, out_dir)
+            meas, proc = f_meas.result(), f_proc.result()
+        lots = sorted(meas["lot"].dropna().str.strip().unique())
+    else:
+        meas = _fetch("meas", SQL_MEAS, start, end, out_dir)
+        lots = sorted(meas["lot"].dropna().str.strip().unique())
+        proc = _fetch("proc", SQL_PROC, p_start3, end, out_dir,
+                      lots if "{lots}" in SQL_PROC else None)
     if meas.empty:
         raise SystemExit("[오류] 쿼리2(계측) 조회 결과가 0행입니다. 기간/조건을 확인하세요.")
-    lots = sorted(meas["lot"].dropna().str.strip().unique())
-    proc = _fetch("proc", SQL_PROC, start - pd.Timedelta(days=PROC_LOOKBACK_DAYS), end,
-                  out_dir, lots)
     if proc.empty:
         raise SystemExit("[오류] 쿼리3(공정) 조회 결과가 0행입니다. 기간/조건을 확인하세요.")
 
